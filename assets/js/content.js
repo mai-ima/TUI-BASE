@@ -58,7 +58,8 @@ window.CONTENT = {
       'このページの文章は assets/js/content.js に入っています。',
       '書き換えれば、あなたのサイトになります。',
       '',
-      'おまけに、遊べるものも入れてあります。{accent:games} と入力してみてください。'
+      'おまけに、遊べるものと、たくさんのコマンドが入っています。',
+      '{accent:games} でゲーム一覧、{accent:manual} で全コマンドの使い方が読めます。'
     ],
     en: [
       'TUI-BASE is a starting point for terminal-flavoured websites.',
@@ -72,7 +73,8 @@ window.CONTENT = {
       'Everything you are reading lives in assets/js/content.js.',
       'Rewrite it and the site becomes yours.',
       '',
-      'There are games in here too. Type {accent:games} to see them.'
+      'There are games in here too, and a great many commands.',
+      'Type {accent:games} for the games, {accent:manual} for the full reference.'
     ]
   },
 

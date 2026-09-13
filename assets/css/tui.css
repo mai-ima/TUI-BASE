@@ -393,6 +393,65 @@ a:hover, a:focus-visible { color: var(--accent); }
 .g-amulet { color: var(--err); font-weight: bold; text-shadow: var(--glow); }
 .g-dark   { opacity: .35; font-weight: normal; text-shadow: none; }
 
+/* --- アーケード系（tetris / snake / 2048 / mine / sokoban） --- */
+.g-body { min-width: 0; }
+.t-body {
+  display: flex;
+  gap: 0 3ch;
+  align-items: flex-start;
+  padding: .5em 1.5ch;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.t-body::-webkit-scrollbar { display: none; }
+.t-board, .t-side { white-space: pre; line-height: 1.05; }
+.t-side { color: var(--dim); }
+.n-grid { line-height: 1.15; }
+
+/* テトリスの 7 種の色（どのテーマでも見分けられるように固定） */
+:root {
+  --p-i: #4dd0e1; --p-o: #ffd54f; --p-t: #ce93d8;
+  --p-s: #81c784; --p-z: #e57373; --p-j: #64b5f6; --p-l: #ffb74d;
+}
+[data-theme="paper"] {
+  --p-i: #00838f; --p-o: #a67c00; --p-t: #7b1fa2;
+  --p-s: #2e7d32; --p-z: #c62828; --p-j: #1565c0; --p-l: #e65100;
+}
+.p-i { color: var(--p-i); }
+.p-o { color: var(--p-o); }
+.p-t { color: var(--p-t); }
+.p-s { color: var(--p-s); }
+.p-z { color: var(--p-z); }
+.p-j { color: var(--p-j); }
+.p-l { color: var(--p-l); }
+.p-empty { color: var(--faint); }
+.p-ghost { color: var(--dim); }
+
+/* 2048 のタイル */
+.n2 { color: var(--dim); }
+.n4 { color: var(--fg); }
+.n8 { color: var(--p-i); }
+.n16 { color: var(--p-j); }
+.n32 { color: var(--p-s); }
+.n64 { color: var(--p-t); }
+.n128 { color: var(--p-o); }
+.n256 { color: var(--p-l); }
+.n512 { color: var(--p-z); font-weight: bold; }
+.n1024 { color: var(--accent); font-weight: bold; }
+.n2048 { color: var(--accent); font-weight: bold; text-shadow: var(--glow); }
+.n4096, .n8192 { color: var(--accent-2); font-weight: bold; text-shadow: var(--glow); }
+
+/* マインスイーパの数字とカーソル */
+.m1 { color: var(--p-j); }
+.m2 { color: var(--p-s); }
+.m3 { color: var(--p-z); }
+.m4 { color: var(--p-t); }
+.m5 { color: var(--p-l); }
+.m6 { color: var(--p-i); }
+.m7 { color: var(--fg); }
+.m8 { color: var(--dim); }
+.cur { background: var(--sel); }
+
 /* スマートフォン用の方向キー */
 .g-pad {
   display: grid;

@@ -103,14 +103,22 @@
 
   function def(name, opts) { registry[name] = opts; }
 
-  /* help と manual で共通の分類名 */
+  /* help と manual で共通の分類。[id, 日本語, 英語] の順で並ぶ */
+  var GROUPS = [
+    ['info', '内容', 'content'],
+    ['fs', 'ファイル', 'files'],
+    ['game', 'ゲーム', 'games'],
+    ['dos', 'コマンドプロンプト風', 'DOS-style'],
+    ['unix', 'Unix 風', 'UNIX-style'],
+    ['text', '文字を扱う', 'text tools'],
+    ['fun', 'お遊び', 'fun'],
+    ['sys', '設定・その他', 'system']
+  ];
+
   function groupLabels() {
-    return {
-      info: ja() ? '内容' : 'content',
-      fs: ja() ? 'ファイル' : 'files',
-      game: ja() ? 'ゲーム' : 'games',
-      sys: ja() ? '設定・その他' : 'system'
-    };
+    var o = {};
+    GROUPS.forEach(function (g) { o[g[0]] = ja() ? g[1] : g[2]; });
+    return o;
   }
 
   function shortcutRows() {
@@ -137,6 +145,51 @@
     manual: ['manual', 'manual cat'],
     echo: ['echo hello'],
     ttt: ['ttt', 'ttt hard'],
+    mine: ['mine', 'mine easy', 'mine hard'],
+    sokoban: ['sokoban', 'sokoban 3'],
+    quiz: ['quiz', 'quiz 12'],
+    grep: ['grep TUI', 'grep 端末 README.md'],
+    find: ['find md'],
+    head: ['head README.md', 'head -n 3 README.md'],
+    tail: ['tail -n 2 skills.txt'],
+    wc: ['wc README.md'],
+    sort: ['sort skills.txt'],
+    which: ['which cat'],
+    apropos: ['apropos file'],
+    calc: ['calc 12*(3+4)', 'calc 2^10', 'calc (1+2)/3'],
+    seq: ['seq 5', 'seq 3 9'],
+    sleep: ['sleep 2'],
+    figlet: ['figlet TUI', 'figlet 2026'],
+    morse: ['morse sos'],
+    nato: ['nato abc'],
+    base64: ['base64 hello'],
+    unbase64: ['unbase64 aGVsbG8='],
+    rot13: ['rot13 hello'],
+    hash: ['hash hello'],
+    repeat: ['repeat 3 ha'],
+    password: ['password', 'password 24'],
+    lorem: ['lorem 5'],
+    urlencode: ['urlencode a b&c'],
+    roll: ['roll', 'roll 2d6', 'roll 3d20'],
+    choose: ['choose A B C'],
+    cowsay: ['cowsay hello'],
+    '8ball': ['8ball ...?'],
+    ping: ['ping example.com'],
+    tracert: ['tracert example.com'],
+    title: ['title my terminal', 'title'],
+    color: ['color 0a', 'color f0'],
+    type: ['type README.md'],
+    dir: ['dir', 'dir projects'],
+    file: ['file README.md'],
+    stat: ['stat README.md'],
+    uname: ['uname -a'],
+    basename: ['basename /a/b/c.txt'],
+    dirname: ['dirname /a/b/c.txt'],
+    upper: ['upper hello'],
+    lower: ['lower HELLO'],
+    rev: ['rev hello'],
+    count: ['count hello world'],
+    yes: ['yes ok'],
     rogue: ['rogue']
   };
 
@@ -611,12 +664,47 @@
 
   /* エイリアス */
   var ALIAS = {
-    dir: 'ls', 'll': 'ls', 'cls': 'clear', 'h': 'help', '?': 'help',
+    'll': 'ls', 'cls': 'clear', 'h': 'help', '?': 'help',
     links: 'contact', me: 'about', work: 'projects', logo: 'banner',
     ja: 'lang ja', en: 'lang en',
     usage: 'manual', commands: 'manual', guide: 'manual',
     'ヘルプ': 'help', '使い方': 'manual'
   };
+
+  /* ---------- 行 → 素のテキスト ------------------------------------------ */
+  /* grep や wc のように、表示用の行を文字として扱いたいときに使う */
+
+  function plainSeg(seg) {
+    if (typeof seg === 'string') return seg.replace(/\{[a-z0-9-]+:([^}]*)\}/gi, '$1');
+    if (seg && seg.t !== undefined) return String(seg.t);
+    return '';
+  }
+
+  function plainLine(line) {
+    if (line === '' || line === null || line === undefined) return [''];
+    if (typeof line === 'string') return [plainSeg(line)];
+    if (Array.isArray(line)) return [line.map(plainSeg).join('')];
+    if (line.hr) return ['────────────────────'];
+    if (line.row) {
+      var k = Array.isArray(line.row[0]) ? line.row[0].map(plainSeg).join('') : plainSeg(line.row[0]);
+      var v = Array.isArray(line.row[1]) ? line.row[1].map(plainSeg).join('') : plainSeg(line.row[1]);
+      return [k + '  ' + v];
+    }
+    if (line.block) {
+      var out = [];
+      (line.block.lines || []).forEach(function (l) { out = out.concat(plainLine(l)); });
+      return out;
+    }
+    if (line.node) return String(line.node.textContent || '').split('\n');
+    if (line.t !== undefined) return [String(line.t)];
+    return [String(line)];
+  }
+
+  function plain(lines) {
+    var out = [];
+    (Array.isArray(lines) ? lines : [lines]).forEach(function (l) { out = out.concat(plainLine(l)); });
+    return out;
+  }
 
   /* ---------- 実行 ------------------------------------------------------ */
 
@@ -661,10 +749,11 @@
     var raw = input.trim();
     if (!raw) return Promise.resolve();
 
-    if (ALIAS[raw.toLowerCase()]) raw = ALIAS[raw.toLowerCase()];
+    // 別名より、同じ名前の本物のコマンドを優先する
+    if (!registry[raw.toLowerCase()] && ALIAS[raw.toLowerCase()]) raw = ALIAS[raw.toLowerCase()];
     var tokens = tokenize(raw);
     var name = tokens[0].toLowerCase();
-    if (ALIAS[name] && ALIAS[name].indexOf(' ') === -1) name = ALIAS[name];
+    if (!registry[name] && ALIAS[name] && ALIAS[name].indexOf(' ') === -1) name = ALIAS[name];
     var args = tokens.slice(1);
 
     var cmd = registry[name];
@@ -783,6 +872,9 @@
   }
 
   TB.commands = registry;
+  TB.groups = GROUPS;
+  TB.plain = plain;
+  TB.readNode = readNode;
   TB.def = def;
   TB.head = head;
   TB.alias = ALIAS;

@@ -17,8 +17,9 @@ guest@tui-base:~$ help
 - **日本語 / 英語の切り替え** — `lang ja` / `lang en`
 - **CRT 風の効果** — `crt on` / `crt off`
 - **メニュー操作** — 左（スマートフォンでは上）のメニューはクリックでも動きます
-- **ゲーム 3 種** — `rogue`（ローグライク）、`guess`（数当て）、`ttt`（三目並べ）
-- **おまけ** — `neofetch` `fortune` `matrix` `sudo` など
+- **ゲーム 12 種** — `tetris` `rogue` `snake` `2048` `mine` `sokoban` ほか（`games` で一覧）
+- **コマンド 136 個** — Unix 風・コマンドプロンプト風・文字を扱うもの・お遊びまで
+- **おまけ** — `neofetch` `fortune` `matrix` `cowsay` `figlet` `clock` など
 - JavaScript が無効でも、主要な文章は `<noscript>` で読めます
 
 キー操作: `Tab` 補完 / `↑` `↓` 履歴 / `Ctrl+L` 画面消去 / `Ctrl+C` 入力取消 / `Ctrl+U` 行削除
@@ -28,34 +29,37 @@ guest@tui-base:~$ help
 
 ## 遊ぶ
 
-`games` で一覧が出ます。記録はブラウザに保存されます。
+`games` で一覧と自己記録が出ます。記録はブラウザに保存されます。
 
-### rogue — ローグライク
+### キーで直接操作するもの
 
-自動生成される迷宮を潜り、地下 8 階の護符を持ち帰るゲームです。
-視界（影の落ち方）、モンスターの追跡、レベルアップ、装備と薬を備えた
-本格的なターン制ローグライクで、キー入力はゲーム側が直接受け取ります。
+| コマンド | 内容 |
+| --- | --- |
+| `tetris` | テトリス。7 種バッグ・ホールド・ゴースト・ハードドロップ・レベル上昇 |
+| `rogue` | ローグライク。自動生成の迷宮を潜り、地下 8 階の護符を持ち帰る |
+| `snake` | スネーク。食べるほど伸びて速くなる |
+| `2048` | 2048。同じ数を合わせて大きくする |
+| `mine` | マインスイーパ。`mine easy` / `normal` / `hard` |
+| `sokoban` | 倉庫番。全 8 面。`u` で一手戻す |
 
-```
-移動      矢印キー または hjkl
-斜め移動  y u b n
-待つ      .
-薬を飲む  p
-やめる    q
-```
+操作は共通で、矢印キー（または `hjkl`）で動かし、`q` でやめます。
+テトリスは `↑` 回転・スペースでハードドロップ・`c` でホールド・`p` で一時停止、
+ローグライクは `y u b n` で斜め移動・`p` で薬・`.` で待機です。
+スマートフォンでは画面の中に方向キーが出ます。
 
-スマートフォンでは画面内に方向キーが出ます。
-`@` があなた、`#` が壁、`>` が下り階段、`!` が薬、`$` が金貨、`)` `[` が装備、
-`*` が護符です。アルファベットの文字はすべてモンスターで、深く潜るほど強くなります。
+ローグライクの記号は `@` あなた、`#` 壁、`>` 下り階段、`!` 薬、`$` 金貨、
+`)` `[` 装備、`*` 護符。アルファベットはすべてモンスターで、深いほど強くなります。
 
-### guess — 数当て
+### 1 行ずつ入力して遊ぶもの
 
-1〜100 の数を当てます。範囲がバーで表示され、最少手数が記録に残ります。
-
-### ttt — 三目並べ
-
-`ttt easy` / `ttt normal` / `ttt hard` で難易度を選べます。
-`hard` の CPU は minimax で最善手を打つため、勝つことはできません（引き分けが最高）。
+| コマンド | 内容 |
+| --- | --- |
+| `guess` | 数当て。残りの範囲がバーで出る |
+| `ttt` | 三目並べ。`easy` / `normal` / `hard`（hard は最善手なので引き分けが最高） |
+| `rps` | じゃんけん。`r` `s` `p` または「ぐー」「ちょき」「ぱー」 |
+| `hangman` | 言葉当て。1 文字ずつ、または単語まるごと |
+| `blackjack` | ブラックジャック。`h` で引く、`s` で止める |
+| `quiz` | コマンドの豆知識クイズ。`quiz 12` で問題数を指定 |
 
 ## 動かし方
 
@@ -85,6 +89,30 @@ npx vercel --prod # 本番環境
 ```
 
 `vercel.json` にはキャッシュとセキュリティヘッダだけを書いてあります。
+
+## コマンド
+
+`help` で一覧、`manual` で全 136 個の使い方（書式・例・別名）が読めます。
+分類は次のとおりです。
+
+| 分類 | 例 |
+| --- | --- |
+| 内容 | `about` `projects` `skills` `contact` `help` `manual` |
+| ファイル | `ls` `cd` `cat` `pwd` `tree` |
+| ゲーム | `tetris` `rogue` `snake` `2048` `mine` `sokoban` `quiz` ほか |
+| コマンドプロンプト風 | `dir` `type` `ver` `vol` `ipconfig` `ping` `tracert` `tasklist` `title` `color` `pause` `set` `chkdsk` ほか |
+| Unix 風 | `uname` `uptime` `ps` `top` `df` `free` `du` `find` `grep` `head` `tail` `wc` `sort` `uniq` `stat` `which` `alias` `apropos` `cal` `seq` `sleep` `sl` ほか |
+| 文字を扱う | `calc` `figlet` `base64` `rot13` `morse` `nato` `hash` `uuid` `password` `lorem` `upper` `rev` ほか |
+| お遊び | `cowsay` `8ball` `roll` `flip` `choose` `joke` `weather` `coffee` `clock` |
+| 設定・その他 | `theme` `lang` `crt` `banner` `neofetch` `history` `open` `fortune` `clear` |
+
+`grep` `head` `tail` `wc` `sort` `find` `du` `stat` は、この中の仮想ファイルを
+本当に読んで動きます。`calc` は `eval` を使わない自前の式解釈で計算します。
+`title` はウィンドウ名を、`color 0a` のような DOS の色コードはテーマを実際に変えます。
+
+いっぽう `ipconfig` `ping` `tracert` `netstat` `ps` `df` `tasklist` などは、
+本物の機械やネットワークを覗いているわけではなく、それらしい表示を返すだけです
+（`manual` の説明にも「演出」と書いてあります）。
 
 ## 中身を書き換える
 
@@ -122,7 +150,11 @@ assets/js/content.js    サイトの中身（ここだけ編集すれば OK）
 assets/js/fs.js         言語・保存まわりと仮想ファイルシステム
 assets/js/term.js       画面描画と入力（履歴・補完・カーソル）
 assets/js/commands.js   コマンドの定義
-assets/js/games.js      ゲーム 3 種（rogue / guess / ttt）
+assets/js/games.js      rogue / guess / ttt と games 一覧
+assets/js/gamekit.js    ゲームの共通部品（枠・入力・記録）
+assets/js/games-arcade.js  tetris / snake / 2048 / mine / sokoban
+assets/js/games-mini.js    rps / hangman / blackjack / quiz
+assets/js/commands-extra.js  追加コマンド（DOS 風・Unix 風・文字・お遊び）
 assets/js/app.js        起動処理、メニュー、ステータスバー
 ```
 

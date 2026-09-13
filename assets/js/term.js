@@ -140,14 +140,21 @@
   var reduceMotion = window.matchMedia &&
     window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-  /** 行を少しずつ出す。キー操作やクリックで即座に最後まで飛ぶ。 */
+  /**
+   * 行を少しずつ出す。キー操作やクリックで即座に最後まで飛ぶ。
+   * 長い出力は 1 回に数行ずつまとめて出し、待ち時間が伸びすぎないようにする
+   * （manual のような長い一覧でも、流れて出る感じは保つ）。
+   */
+  var MAX_STEPS = 70;
+
   function typeAll(lines, delay) {
     lines = Array.isArray(lines) ? lines : [lines];
     delay = delay === undefined ? 16 : delay;
-    if (reduceMotion || delay === 0 || lines.length > 60) {
+    if (reduceMotion || delay === 0 || !lines.length) {
       printAll(lines);
       return Promise.resolve();
     }
+    var chunk = Math.max(1, Math.ceil(lines.length / MAX_STEPS));
     skipRequested = false;
     setBusy(true);
     return new Promise(function (resolve) {
@@ -158,7 +165,7 @@
           setBusy(false); resolve(); return;
         }
         if (i >= lines.length) { setBusy(false); resolve(); return; }
-        print(lines[i++]);
+        for (var n = 0; n < chunk && i < lines.length; n++) print(lines[i++]);
         setTimeout(step, delay);
       })();
     });

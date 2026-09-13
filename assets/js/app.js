@@ -76,9 +76,12 @@
   ];
 
   var NAV3 = [
-    { cmd: 'rogue', key: 'G1' },
-    { cmd: 'guess', key: 'G2' },
-    { cmd: 'ttt', key: 'G3' }
+    { cmd: 'tetris', key: 'G1' },
+    { cmd: 'rogue', key: 'G2' },
+    { cmd: 'snake', key: 'G3' },
+    { cmd: '2048', key: 'G4' },
+    { cmd: 'mine', key: 'G5' },
+    { cmd: 'games', key: 'G6' }
   ];
 
   var NAV2 = [

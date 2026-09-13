@@ -802,21 +802,51 @@
 
   /* --- ゲーム一覧 ------------------------------------------------------ */
 
+  /* 記録の読み方: [保存キー, 表示名, 単位] */
+  var RECORDS = [
+    ['tetris', 'tetris', { ja: ' 点', en: ' points' }],
+    ['rogue', 'rogue', { ja: ' 点', en: ' points' }],
+    ['snake', 'snake', { ja: ' 点', en: ' points' }],
+    ['2048', '2048', { ja: ' 点', en: ' points' }],
+    ['mine-easy', 'mine easy', { ja: ' 秒', en: 's' }],
+    ['mine-normal', 'mine normal', { ja: ' 秒', en: 's' }],
+    ['mine-hard', 'mine hard', { ja: ' 秒', en: 's' }],
+    ['guess', 'guess', { ja: ' 回で正解', en: ' guesses' }],
+    ['quiz', 'quiz', { ja: ' 問正解', en: ' correct' }],
+    ['hangman', 'hangman', { ja: ' 回余して正解', en: ' tries to spare' }]
+  ];
+
   def('games', {
     group: 'game',
-    desc: { ja: '遊べるものの一覧', en: 'list the games' },
+    desc: { ja: '遊べるものの一覧と自己記録', en: 'list the games and your records' },
     run: function () {
       var out = TB.head(L('ゲーム', 'games'));
-      out.push({ row: ['rogue', L('ローグライク。地下 8 階の護符を目指す本格版。', 'A proper roguelike. Reach the amulet on floor 8.')] });
-      out.push({ row: ['guess', L('数当て。1〜100 を何回で当てられるか。', 'Guess a number from 1 to 100.')] });
-      out.push({ row: ['ttt', L('三目並べ。easy / normal / hard。', 'Tic-tac-toe. easy / normal / hard.')] });
+      out.push([{ t: ja()
+        ? '遊びたいものの名前を入力してください。記録はこの端末に残ります。'
+        : 'Type the name of the one you want. Records are kept in this browser.', c: 'dim' }], '');
+
+      Object.keys(TB.commands).forEach(function (name) {
+        var c = TB.commands[name];
+        if ((c.group || '') !== 'game' || c.hidden || name === 'games') return;
+        out.push({ row: [[{ t: c.usage || name, c: 'accent' }], t(c.desc)] });
+      });
       out.push('');
-      var rb = TB.store.get('best:rogue', null);
-      var gb = TB.store.get('best:guess', null);
-      if (rb || gb) {
+
+      var rows = [];
+      RECORDS.forEach(function (r) {
+        var v = TB.store.get('best:' + r[0], null);
+        if (v !== null) rows.push({ row: [r[1], v + t(r[2])] });
+      });
+      var ttt = TB.store.get('ttt', null);
+      if (ttt) {
+        try {
+          var rec = JSON.parse(ttt);
+          rows.push({ row: ['ttt', L(rec.w + ' 勝 ' + rec.l + ' 敗 ' + rec.d + ' 分', rec.w + 'W ' + rec.l + 'L ' + rec.d + 'D')] });
+        } catch (e) { /* ignore */ }
+      }
+      if (rows.length) {
         out.push([{ t: L('あなたの記録', 'your records'), c: 'accent-2' }]);
-        if (rb) out.push({ row: ['rogue', L(rb + ' 点', rb + ' points')] });
-        if (gb) out.push({ row: ['guess', L(gb + ' 回', gb + ' guesses')] });
+        out = out.concat(rows);
         out.push('');
       }
       return out;
