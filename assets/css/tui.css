@@ -318,6 +318,94 @@ a:hover, a:focus-visible { color: var(--accent); }
 
 .rain { color: var(--accent); white-space: pre; overflow: hidden; line-height: 1.25; }
 
+/* ---------- ゲーム ---------------------------------------------------- */
+/* 三目並べの盤。罫線をつなげるため行間を詰める */
+.board { line-height: 1.15; margin: .35em 0; }
+.board .line { min-height: 0; }
+/* 勝ちラインの強調。桁がずれないよう余白は足さない */
+.board .hit { background: var(--sel); }
+
+.game {
+  margin: .4em 0 .8em;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+  overflow: hidden;
+}
+
+.g-status {
+  padding: .2em 1.5ch;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-pane);
+  white-space: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.g-status::-webkit-scrollbar { display: none; }
+
+.g-map {
+  padding: .5em 1.5ch;
+  line-height: 1.2;
+  white-space: pre;
+  overflow-x: auto;
+  scrollbar-width: none;
+  letter-spacing: .04em;
+}
+.g-map::-webkit-scrollbar { display: none; }
+.g-row { min-height: 1.2em; }
+
+.g-log {
+  padding: .3em 1.5ch .5em;
+  border-top: 1px solid var(--border);
+  min-height: calc(3 * var(--lh) * 1em);
+}
+.g-hint {
+  padding: 0 1.5ch .45em;
+  color: var(--dim);
+  font-size: .92em;
+  overflow-x: auto;
+  white-space: nowrap;
+  scrollbar-width: none;
+}
+.g-hint::-webkit-scrollbar { display: none; }
+
+/* 記号の色 */
+.g-void   { color: transparent; }
+.g-wall   { color: var(--dim); }
+.g-floor  { color: var(--faint); }
+.g-stair  { color: var(--accent-2); font-weight: bold; }
+.g-you    { color: var(--fg); font-weight: bold; text-shadow: var(--glow); }
+.g-m1     { color: var(--dim); }
+.g-m2     { color: var(--accent); }
+.g-m3     { color: var(--warn); }
+.g-m4     { color: var(--err); font-weight: bold; }
+.g-potion { color: var(--accent); }
+.g-gold   { color: var(--warn); }
+.g-gear   { color: var(--accent-2); }
+.g-amulet { color: var(--err); font-weight: bold; text-shadow: var(--glow); }
+.g-dark   { opacity: .35; font-weight: normal; text-shadow: none; }
+
+/* スマートフォン用の方向キー */
+.g-pad {
+  display: grid;
+  grid-template-columns: repeat(3, 3.2em);
+  gap: 4px;
+  justify-content: center;
+  padding: .5em 0 .8em;
+  border-top: 1px solid var(--border);
+}
+.g-pad button {
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg-pane);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: .5em 0;
+  cursor: pointer;
+}
+.g-pad button:active { color: var(--accent); border-color: var(--accent); }
+.g-pad button.wide { grid-column: 1 / -1; color: var(--dim); }
+
 /* ---------- 5. input ------------------------------------------------- */
 .inputline {
   position: relative;

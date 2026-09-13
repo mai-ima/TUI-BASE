@@ -56,7 +56,9 @@ window.CONTENT = {
       '  3. 触れること    — 履歴・補完・テーマ・日本語/英語切替',
       '',
       'このページの文章は assets/js/content.js に入っています。',
-      '書き換えれば、あなたのサイトになります。'
+      '書き換えれば、あなたのサイトになります。',
+      '',
+      'おまけに、遊べるものも入れてあります。{accent:games} と入力してみてください。'
     ],
     en: [
       'TUI-BASE is a starting point for terminal-flavoured websites.',
@@ -68,7 +70,9 @@ window.CONTENT = {
       '  3. Tactile  — history, completion, themes, JA/EN',
       '',
       'Everything you are reading lives in assets/js/content.js.',
-      'Rewrite it and the site becomes yours.'
+      'Rewrite it and the site becomes yours.',
+      '',
+      'There are games in here too. Type {accent:games} to see them.'
     ]
   },
 

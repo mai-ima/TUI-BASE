@@ -74,6 +74,12 @@
     { cmd: 'help', key: '06' }
   ];
 
+  var NAV3 = [
+    { cmd: 'rogue', key: 'G1' },
+    { cmd: 'guess', key: 'G2' },
+    { cmd: 'ttt', key: 'G3' }
+  ];
+
   var NAV2 = [
     { cmd: 'theme', key: 'T' },
     { cmd: 'lang', key: 'L', label: { ja: 'lang (en)', en: 'lang (ja)' } },
@@ -92,13 +98,17 @@
     n.textContent = item.label ? TB.t(item.label) : item.cmd;
     b.appendChild(k);
     b.appendChild(n);
-    b.addEventListener('click', function () { submit(item.cmd); });
+    b.addEventListener('click', function () {
+      if (TB.Term.isCapturing()) return;               // ローグライク中は触らない
+      if (TB.lineHandler) TB.setLineHandler(null);     // 行入力のゲームは中断する
+      submit(item.cmd);
+    });
     li.appendChild(b);
     return li;
   }
 
   function renderNav() {
-    [['nav-list', NAV], ['nav-list-2', NAV2]].forEach(function (pair) {
+    [['nav-list', NAV], ['nav-list-3', NAV3], ['nav-list-2', NAV2]].forEach(function (pair) {
       var ul = document.getElementById(pair[0]);
       if (!ul) return;
       ul.textContent = '';
@@ -112,6 +122,11 @@
 
   function submit(input) {
     queue = queue.then(function () {
+      // ゲーム中など、入力を受け取る役がいればそちらへ回す
+      if (TB.lineHandler) {
+        TB.Term.echo(input.trim());
+        return TB.lineHandler(input.trim());
+      }
       if (input.trim()) TB.Term.echo(input.trim());
       return TB.run(input);
     }).then(function () {

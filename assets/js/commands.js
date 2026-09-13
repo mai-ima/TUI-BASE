@@ -109,7 +109,12 @@
     run: function () {
       var out = head(ui('commands'));
       out.push([{ t: ui('helphead'), c: 'dim' }], '');
-      var groups = { info: ja() ? '内容' : 'content', fs: ja() ? 'ファイル' : 'files', sys: ja() ? '設定・その他' : 'system' };
+      var groups = {
+        info: ja() ? '内容' : 'content',
+        fs: ja() ? 'ファイル' : 'files',
+        game: ja() ? 'ゲーム' : 'games',
+        sys: ja() ? '設定・その他' : 'system'
+      };
       Object.keys(groups).forEach(function (g) {
         out.push([{ t: groups[g], c: 'accent-2' }]);
         Object.keys(registry).forEach(function (name) {
@@ -553,6 +558,12 @@
     return prev[n];
   }
 
+  /** games.js などから使う、行の受け取り役の差し替え */
+  function setLineHandler(fn, label) {
+    TB.lineHandler = fn || null;
+    TB.Term.setPromptLabel(fn ? (label || '>') : null);
+  }
+
   function run(input) {
     var raw = input.trim();
     if (!raw) return Promise.resolve();
@@ -679,6 +690,11 @@
   }
 
   TB.commands = registry;
+  TB.def = def;
+  TB.head = head;
+  TB.alias = ALIAS;
+  TB.setLineHandler = setLineHandler;
+  TB.lineHandler = null;
   TB.run = run;
   TB.complete = complete;
   TB.suggest = suggest;

@@ -21,6 +21,10 @@
   var busy = false;
   var skipRequested = false;
 
+  /* ゲームなどがキー入力を丸ごと受け取っているときの受け口 */
+  var captureFn = null;
+  var promptLabel = null;
+
   /* ---------- テキスト → DOM ------------------------------------------ */
 
   function linkify(text, frag) {
@@ -179,6 +183,7 @@
   /* ---------- プロンプト・入力 ------------------------------------------ */
 
   function promptText() {
+    if (promptLabel) return promptLabel;
     var m = window.CONTENT.meta;
     return m.user + '@' + m.host + ':' + TB.fs.display(TB.state.cwd) + '$';
   }
@@ -186,6 +191,13 @@
   function renderPrompt() {
     var m = window.CONTENT.meta;
     promptEl.textContent = '';
+    if (promptLabel) {
+      var lab = document.createElement('span');
+      lab.className = 'path';
+      lab.textContent = promptLabel;
+      promptEl.appendChild(lab);
+      return;
+    }
     promptEl.appendChild(document.createTextNode(m.user + '@' + m.host + ':'));
     var path = document.createElement('span');
     path.className = 'path';
@@ -222,7 +234,7 @@
     busy = b;
     lineEl.classList.toggle('idle', b);
     var mode = document.getElementById('st-mode');
-    if (mode) mode.textContent = b ? TB.ui('busy') : TB.ui('ready');
+    if (mode && !captureFn) mode.textContent = b ? TB.ui('busy') : TB.ui('ready');
   }
 
   function focus() {
@@ -331,13 +343,49 @@
       if (!window.getSelection().toString()) inputEl.focus({ preventScroll: true });
     });
 
+    // キー入力を丸ごと横取りするモード（ゲーム用）。捕捉フェーズで先に受け取る。
     window.addEventListener('keydown', function (e) {
+      if (!captureFn) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      e.preventDefault();
+      e.stopPropagation();
+      captureFn(e.key);
+    }, true);
+
+    window.addEventListener('keydown', function (e) {
+      if (captureFn) return;
       if (e.target === inputEl) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (e.key.length === 1 || e.key === 'Backspace') {
         inputEl.focus({ preventScroll: true });
       }
     });
+  }
+
+  /* ---------- モード切り替え -------------------------------------------- */
+
+  /** キー入力を handler に渡し、入力行を隠す（ゲーム中） */
+  function capture(handler) {
+    captureFn = handler;
+    lineEl.hidden = true;
+    var mode = document.getElementById('st-mode');
+    if (mode) mode.textContent = 'GAME';
+    try { inputEl.blur(); } catch (e) { /* ignore */ }
+  }
+
+  function release() {
+    captureFn = null;
+    lineEl.hidden = false;
+    var mode = document.getElementById('st-mode');
+    if (mode) mode.textContent = TB.ui('ready');
+    setValue('');
+    focus();
+  }
+
+  /** プロンプトの表示を差し替える（例: "guess>"）。null で元に戻す。 */
+  function setPromptLabel(label) {
+    promptLabel = label;
+    renderPrompt();
   }
 
   TB.Term = {
@@ -353,6 +401,10 @@
     setValue: setValue,
     setBusy: setBusy,
     renderPrompt: renderPrompt,
+    capture: capture,
+    release: release,
+    isCapturing: function () { return !!captureFn; },
+    setPromptLabel: setPromptLabel,
     getValue: function () { return inputEl.value; },
     history: function () { return history.slice(); },
     isBusy: function () { return busy; },
