@@ -18,7 +18,8 @@ guest@tui-base:~$ help
 - **CRT 風の効果** — `crt on` / `crt off`
 - **メニュー操作** — 左（スマートフォンでは上）のメニューはクリックでも動きます
 - **ゲーム 12 種** — `tetris` `rogue` `snake` `2048` `mine` `sokoban` ほか（`games` で一覧）
-- **コマンド 136 個** — Unix 風・コマンドプロンプト風・文字を扱うもの・お遊びまで
+- **コマンド 227 個** — Windows / Unix / macOS / Linux / Android / iOS 風、文字の道具、お遊び
+- **かくれコマンド 47 個** — `help` には出さず、`manual` にだけ ◆ 印で載せています
 - **おまけ** — `neofetch` `fortune` `matrix` `cowsay` `figlet` `clock` など
 - JavaScript が無効でも、主要な文章は `<noscript>` で読めます
 
@@ -92,27 +93,56 @@ npx vercel --prod # 本番環境
 
 ## コマンド
 
-`help` で一覧、`manual` で全 136 個の使い方（書式・例・別名）が読めます。
+`help` で一覧、`manual` で全 227 個の使い方（書式・例・別名）が読めます。
 分類は次のとおりです。
 
-| 分類 | 例 |
-| --- | --- |
-| 内容 | `about` `projects` `skills` `contact` `help` `manual` |
-| ファイル | `ls` `cd` `cat` `pwd` `tree` |
-| ゲーム | `tetris` `rogue` `snake` `2048` `mine` `sokoban` `quiz` ほか |
-| コマンドプロンプト風 | `dir` `type` `ver` `vol` `ipconfig` `ping` `tracert` `tasklist` `title` `color` `pause` `set` `chkdsk` ほか |
-| Unix 風 | `uname` `uptime` `ps` `top` `df` `free` `du` `find` `grep` `head` `tail` `wc` `sort` `uniq` `stat` `which` `alias` `apropos` `cal` `seq` `sleep` `sl` ほか |
-| 文字を扱う | `calc` `figlet` `base64` `rot13` `morse` `nato` `hash` `uuid` `password` `lorem` `upper` `rev` ほか |
-| お遊び | `cowsay` `8ball` `roll` `flip` `choose` `joke` `weather` `coffee` `clock` |
-| 設定・その他 | `theme` `lang` `crt` `banner` `neofetch` `history` `open` `fortune` `clear` |
+| 分類 | 数 | 例 |
+| --- | --- | --- |
+| 内容 | 6 | `about` `projects` `skills` `contact` `help` `manual` |
+| ファイル | 5 | `ls` `cd` `cat` `pwd` `tree` |
+| ゲーム | 13 | `tetris` `rogue` `snake` `2048` `mine` `sokoban` `quiz` ほか |
+| Windows / DOS | 27 | `dir` `type` `ver` `vol` `ipconfig` `ping` `tracert` `tasklist` `title` `color` `pause` `set` `chkdsk` |
+| Unix 風 | 40 | `uname` `uptime` `ps` `top` `df` `du` `find` `grep` `head` `tail` `wc` `sort` `stat` `which` `alias` `apropos` `cal` `seq` `sl` |
+| macOS | 15 | `sw_vers` `say` `pbcopy` `pbpaste` `mdfind` `brew` `diskutil` `caffeinate` `osascript` `launchctl` `airport` |
+| Linux | 23 | `apt` `pacman` `dnf` `systemctl` `journalctl` `dmesg` `lsblk` `lscpu` `lsusb` `ip` `mount` `snap` `lolcat` `vim` `emacs` `nano` |
+| Android | 14 | `adb` `fastboot` `pm` `am` `getprop` `logcat` `dumpsys` `input` `wm` `battery` `vibrate` `share` `toast` |
+| iOS | 12 | `ideviceinfo` `xcrun` `simctl` `siri` `shortcuts` `springboard` `airdrop` `facetime` `haptic` `icloud` |
+| 文字を扱う | 18 | `calc` `figlet` `base64` `rot13` `morse` `nato` `hash` `uuid` `password` `lorem` `upper` `rev` |
+| お遊び | 10 | `cowsay` `8ball` `roll` `flip` `choose` `joke` `weather` `coffee` `clock` |
+| かくれているもの | 27 | `manual` にだけ載っています（下記） |
+| 設定・その他 | 17 | `theme` `lang` `crt` `banner` `neofetch` `history` `open` `beep` `fullscreen` |
 
-`grep` `head` `tail` `wc` `sort` `find` `du` `stat` は、この中の仮想ファイルを
-本当に読んで動きます。`calc` は `eval` を使わない自前の式解釈で計算します。
-`title` はウィンドウ名を、`color 0a` のような DOS の色コードはテーマを実際に変えます。
+### 本当に動くもの
 
-いっぽう `ipconfig` `ping` `tracert` `netstat` `ps` `df` `tasklist` などは、
-本物の機械やネットワークを覗いているわけではなく、それらしい表示を返すだけです
-（`manual` の説明にも「演出」と書いてあります）。
+- `grep` `head` `tail` `wc` `sort` `uniq` `find` `du` `stat` `mdfind` — この中の仮想ファイルを実際に読みます
+- `calc` — `eval` を使わない自前の式解釈（`calc 12*(3+4)-5/2` → `81.5`）
+- `cal` — 本物の今月のカレンダー。今日の日付が反転して出ます
+- `title` — ウィンドウ名を変えます。`color 0a` など DOS の色コードはテーマを変えます
+- `say` — 読み上げ、`beep` — 短い音、`fullscreen` — 全画面
+- `pbcopy` / `pbpaste` — クリップボード（ブラウザの許可が要ります）
+- `battery` `vibrate` `share` `toast` `wm` — スマートフォンで実際に動きます
+- `input text <文字>` — 入力欄に文字を流し込みます
+- `am start tetris` のようにゲーム名を渡すと、そのゲームが本当に始まります
+
+### 表示だけのもの（演出）
+
+`ipconfig` `ping` `tracert` `netstat` `ps` `df` `free` `tasklist` `adb` `fastboot`
+`systemctl` `journalctl` `dmesg` `apt` `brew` `simctl` などは、本物の機械や
+ネットワークを覗いているわけではありません。`manual` の説明文にも（演出）と
+書いてあります。
+
+### かくれコマンド
+
+`help` には出てきません。`manual` で ◆ の印が付いているものがそれです。
+
+```
+xyzzy  42  hello  please  make  :q  cake  tea  telnet  zen  love  404  boo
+moon  credits  secret  konami  tux  apple  droid  win  nyan  snow  dance
+upside  sudo  rm
+```
+
+`↑ ↑ ↓ ↓ ← → ← → b a` と押すと、隠しテーマが開きます（`theme konami`）。
+`upside` は画面をひっくり返し、もう一度打つと戻ります。
 
 ## 中身を書き換える
 
@@ -154,7 +184,9 @@ assets/js/games.js      rogue / guess / ttt と games 一覧
 assets/js/gamekit.js    ゲームの共通部品（枠・入力・記録）
 assets/js/games-arcade.js  tetris / snake / 2048 / mine / sokoban
 assets/js/games-mini.js    rps / hangman / blackjack / quiz
-assets/js/commands-extra.js  追加コマンド（DOS 風・Unix 風・文字・お遊び）
+assets/js/commands-extra.js  追加コマンド（Windows 風・Unix 風・文字・お遊び）
+assets/js/commands-os.js     macOS / Linux / Android / iOS 風のコマンド
+assets/js/easter-eggs.js     かくれコマンドと、コナミコマンド
 assets/js/app.js        起動処理、メニュー、ステータスバー
 ```
 

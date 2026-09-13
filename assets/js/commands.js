@@ -108,8 +108,13 @@
     ['info', '内容', 'content'],
     ['fs', 'ファイル', 'files'],
     ['game', 'ゲーム', 'games'],
-    ['dos', 'コマンドプロンプト風', 'DOS-style'],
+    ['dos', 'コマンドプロンプト風', 'Windows / DOS'],
     ['unix', 'Unix 風', 'UNIX-style'],
+    ['mac', 'macOS 風', 'macOS'],
+    ['linux', 'Linux 風', 'Linux'],
+    ['android', 'Android 風', 'Android'],
+    ['ios', 'iOS 風', 'iOS'],
+    ['egg', 'かくれているもの', 'easter eggs'],
     ['text', '文字を扱う', 'text tools'],
     ['fun', 'お遊び', 'fun'],
     ['sys', '設定・その他', 'system']
@@ -204,11 +209,14 @@
                 { t: ja() ? ' と入力してください。' : '.', c: 'dim' }], '');
       var groups = groupLabels();
       Object.keys(groups).forEach(function (g) {
-        out.push([{ t: groups[g], c: 'accent-2' }]);
-        Object.keys(registry).forEach(function (name) {
+        var names = Object.keys(registry).filter(function (name) {
           var c = registry[name];
-          if (c.hidden || (c.group || 'sys') !== g) return;
-          out.push({ row: [name, t(c.desc)], sub: false });
+          return !c.hidden && (c.group || 'sys') === g;
+        });
+        if (!names.length) return;          // 隠しだけの分類は見出しも出さない
+        out.push([{ t: groups[g], c: 'accent-2' }]);
+        names.forEach(function (name) {
+          out.push({ row: [name, t(registry[name].desc)], sub: false });
         });
         out.push('');
       });
@@ -233,7 +241,10 @@
       var out = head(ja() ? '取扱説明' : 'manual');
       out.push([{ t: ja()
         ? 'すべてのコマンドと、その使い方です。1 つだけ見たいときは man <名前>。'
-        : 'Every command and how to use it. For just one, use man <name>.', c: 'dim' }], '');
+        : 'Every command and how to use it. For just one, use man <name>.', c: 'dim' }]);
+      out.push([{ t: ja()
+        ? '◆ の付いたものは help には出てきません。ここだけに載せています。'
+        : 'Entries marked ◆ never appear in help — they are listed only here.', c: 'dim' }], '');
 
       var groups = groupLabels();
       Object.keys(groups).forEach(function (g) {
@@ -246,7 +257,7 @@
         names.forEach(function (name) {
           var c = registry[name];
           var title = [{ t: '  ' + (c.usage || name), c: 'accent' }];
-          if (c.hidden) title.push({ t: ja() ? '   （隠しコマンド）' : '   (hidden)', c: 'dim' });
+          if (c.hidden) title.push({ t: ja() ? '   ◆ help には出ないコマンド' : '   ◆ hidden from help', c: 'warn' });
           out.push(title);
           out.push([{ t: '      ' + t(c.desc) }]);
           if (EXAMPLES[name] && EXAMPLES[name].length > 1) {

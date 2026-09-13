@@ -53,6 +53,14 @@
   --sel: #3d2a63; --glow: 0 0 16px rgba(255, 95, 210, .25);
 }
 
+/* コナミコマンドで開く隠しテーマ */
+[data-theme="konami"] {
+  --bg: #0a0a12; --bg-pane: #10101f; --bg-inset: #16162a; --fg: #e8e8f0;
+  --dim: #7d7db0; --faint: #2a2a45; --border: #2a2a45;
+  --accent: #ffd93d; --accent-2: #4ea3ff; --warn: #ff9f1c; --err: #ff4d6d;
+  --sel: #3a2a70; --glow: 0 0 14px rgba(255, 217, 61, .3);
+}
+
 [data-theme="paper"] {
   --bg: #f4f1ea; --bg-pane: #fbf9f4; --bg-inset: #eeeae0; --fg: #2f3338;
   --dim: #7b8189; --faint: #ddd8cc; --border: #ddd8cc;
@@ -413,6 +421,14 @@ a:hover, a:focus-visible { color: var(--accent); }
   --p-i: #4dd0e1; --p-o: #ffd54f; --p-t: #ce93d8;
   --p-s: #81c784; --p-z: #e57373; --p-j: #64b5f6; --p-l: #ffb74d;
 }
+/* コナミコマンドで開く隠しテーマ */
+[data-theme="konami"] {
+  --bg: #0a0a12; --bg-pane: #10101f; --bg-inset: #16162a; --fg: #e8e8f0;
+  --dim: #7d7db0; --faint: #2a2a45; --border: #2a2a45;
+  --accent: #ffd93d; --accent-2: #4ea3ff; --warn: #ff9f1c; --err: #ff4d6d;
+  --sel: #3a2a70; --glow: 0 0 14px rgba(255, 217, 61, .3);
+}
+
 [data-theme="paper"] {
   --p-i: #00838f; --p-o: #a67c00; --p-t: #7b1fa2;
   --p-s: #2e7d32; --p-z: #c62828; --p-j: #1565c0; --p-l: #e65100;
@@ -610,6 +626,32 @@ body.crt-on .screen { text-shadow: var(--glow); }
   .caret { animation: none; }
   * { transition-duration: .01ms !important; }
 }
+
+/* ---------- かくれコマンド用 ------------------------------------------ */
+
+/* toast: 画面の下に少しだけ出る小さな帯 */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 8vh;
+  transform: translateX(-50%);
+  z-index: 60;
+  max-width: min(90vw, 60ch);
+  padding: .5em 2ch;
+  background: var(--bg-inset);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, .35);
+  opacity: 1;
+  transition: opacity .5s;
+  pointer-events: none;
+  overflow-wrap: anywhere;
+}
+.toast.go { opacity: 0; }
+
+/* upside: 画面をひっくり返す */
+body.upside .tui { transform: rotate(180deg); }
 
 /* ---------- no-JS fallback ------------------------------------------- */
 .nojs {
