@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="ja" data-theme="midnight">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>TUI-BASE — ブラウザの中の、小さなターミナル</title>
+<meta name="description" content="ビルド不要・依存ゼロのターミナル風ウェブサイト。index.html をそのまま開いても、Vercel に置いても動きます。">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#0b1016">
+<meta property="og:type" content="website">
+<meta property="og:title" content="TUI-BASE">
+<meta property="og:description" content="ブラウザの中の、小さなターミナル。">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%230b1016'/%3E%3Cpath d='M3 4.5l3 3-3 3' stroke='%235ccfa0' stroke-width='1.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M8.5 11h4.5' stroke='%235ccfa0' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="assets/css/tui.css">
+</head>
+<body>
+
+<div class="crt" aria-hidden="true"></div>
+
+<!-- 起動演出（JS が動く環境でのみ表示される） -->
+<div id="boot" class="boot" hidden aria-hidden="true"></div>
+
+<main class="tui" id="tui" hidden>
+
+  <!-- タイトルバー -->
+  <header class="titlebar">
+    <span class="dots" aria-hidden="true"><b>●</b> ● ●</span>
+    <span class="title">
+      <span id="tb-user">guest</span><span class="sep">@</span><span id="tb-host">tui-base</span><span class="sep">:</span><span id="tb-path">~</span>
+    </span>
+    <span class="spacer"></span>
+    <span class="tag" id="tb-tag">TUI-BASE v1.0.0</span>
+  </header>
+
+  <!-- 左メニュー -->
+  <nav class="pane nav" id="nav" aria-label="メニュー">
+    <h2>MENU</h2>
+    <ul id="nav-list"></ul>
+    <h2>SETTINGS</h2>
+    <ul id="nav-list-2"></ul>
+  </nav>
+
+  <!-- 画面本体 -->
+  <section class="pane main" id="main">
+    <div class="screen" id="screen" role="log" aria-live="polite" aria-label="ターミナル出力"></div>
+
+    <div class="inputline" id="inputline">
+      <span class="prompt" id="prompt" aria-hidden="true"></span>
+      <span class="mirror" aria-hidden="true"><span id="m-pre"></span><span class="caret" id="m-caret"> </span><span id="m-post"></span><span class="ghost" id="m-ghost"></span></span>
+      <label class="sr-only" for="cmdline">コマンド入力</label>
+      <input id="cmdline" type="text" autocomplete="off" autocapitalize="off"
+             autocorrect="off" spellcheck="false" enterkeyhint="go" aria-describedby="tb-tag">
+    </div>
+  </section>
+
+  <!-- ステータスバー -->
+  <footer class="statusbar">
+    <span class="mode" id="st-mode">READY</span>
+    <span class="hint" id="st-hint"></span>
+    <span id="st-theme">midnight</span>
+    <span id="st-clock">--:--</span>
+  </footer>
+
+</main>
+
+<noscript>
+  <div class="nojs">
+    <h1>TUI-BASE</h1>
+    <p>このサイトはターミナル風の操作画面ですが、JavaScript が無効のようです。
+       主要な内容はこちらです。</p>
+    <h2>about</h2>
+    <p>TUI-BASE は、ターミナル風のウェブサイトを作るための土台です。
+       ビルド不要・依存ゼロで、<code>index.html</code> を開けばそのまま動きます。
+       文章はすべて <code>assets/js/content.js</code> にあります。</p>
+    <h2>contact</h2>
+    <ul>
+      <li>email: <a href="mailto:you@example.com">you@example.com</a></li>
+      <li>github: <a href="https://github.com/">github.com/you</a></li>
+    </ul>
+  </div>
+</noscript>
+
+<script src="assets/js/content.js"></script>
+<script src="assets/js/fs.js"></script>
+<script src="assets/js/term.js"></script>
+<script src="assets/js/commands.js"></script>
+<script src="assets/js/app.js"></script>
+</body>
+</html>
