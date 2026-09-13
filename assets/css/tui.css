@@ -305,6 +305,14 @@ a:hover, a:focus-visible { color: var(--accent); }
 
 .grid-tags { display: flex; flex-wrap: wrap; gap: 0 2ch; }
 
+/* manual の別名一覧。桁を揃えたいので CSS の段組みにする */
+.alias-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(24ch, 1fr));
+  gap: 0 2ch;
+  padding-left: 2ch;
+}
+
 .hr {
   min-height: 0;
   height: 0;

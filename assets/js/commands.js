@@ -103,18 +103,53 @@
 
   function def(name, opts) { registry[name] = opts; }
 
+  /* help と manual で共通の分類名 */
+  function groupLabels() {
+    return {
+      info: ja() ? '内容' : 'content',
+      fs: ja() ? 'ファイル' : 'files',
+      game: ja() ? 'ゲーム' : 'games',
+      sys: ja() ? '設定・その他' : 'system'
+    };
+  }
+
+  function shortcutRows() {
+    return [
+      { row: ['Tab', ja() ? '入力を補完する' : 'complete input'] },
+      { row: ['↑ / ↓', ja() ? '履歴をたどる' : 'walk through history'] },
+      { row: ['→', ja() ? '薄く出ている候補を確定する' : 'accept the ghost suggestion'] },
+      { row: ['Ctrl+L', ja() ? '画面を消す' : 'clear the screen'] },
+      { row: ['Ctrl+C', ja() ? '入力を取り消す' : 'cancel the line'] },
+      { row: ['Ctrl+U', ja() ? '入力中の行をまとめて消す' : 'erase the whole line'] }
+    ];
+  }
+
+  /* manual に載せる使用例。ここに無いコマンドは引数なしで使える。 */
+  var EXAMPLES = {
+    ls: ['ls', 'ls -a', 'ls projects'],
+    cd: ['cd projects', 'cd ..', 'cd ~'],
+    cat: ['cat README.md', 'cat projects/tui-base.md'],
+    theme: ['theme', 'theme amber'],
+    lang: ['lang en', 'lang ja'],
+    crt: ['crt on', 'crt off'],
+    open: ['open github', 'open https://example.com'],
+    man: ['man ls'],
+    manual: ['manual', 'manual cat'],
+    echo: ['echo hello'],
+    ttt: ['ttt', 'ttt hard'],
+    rogue: ['rogue']
+  };
+
   def('help', {
     group: 'info',
     desc: { ja: 'コマンドの一覧を表示する', en: 'list available commands' },
     run: function () {
       var out = head(ui('commands'));
-      out.push([{ t: ui('helphead'), c: 'dim' }], '');
-      var groups = {
-        info: ja() ? '内容' : 'content',
-        fs: ja() ? 'ファイル' : 'files',
-        game: ja() ? 'ゲーム' : 'games',
-        sys: ja() ? '設定・その他' : 'system'
-      };
+      out.push([{ t: ui('helphead'), c: 'dim' }]);
+      out.push([{ t: ja() ? '使い方まで全部見るには ' : 'for the full reference with usage, type ', c: 'dim' },
+                { t: 'manual', c: 'accent' },
+                { t: ja() ? ' と入力してください。' : '.', c: 'dim' }], '');
+      var groups = groupLabels();
       Object.keys(groups).forEach(function (g) {
         out.push([{ t: groups[g], c: 'accent-2' }]);
         Object.keys(registry).forEach(function (name) {
@@ -125,11 +160,66 @@
         out.push('');
       });
       out.push([{ t: ui('shortcuts'), c: 'accent-2' }]);
-      out.push({ row: ['Tab', ja() ? '入力を補完する' : 'complete input'] });
-      out.push({ row: ['↑ / ↓', ja() ? '履歴をたどる' : 'walk through history'] });
-      out.push({ row: ['→', ja() ? '薄く出ている候補を確定する' : 'accept the ghost suggestion'] });
-      out.push({ row: ['Ctrl+L', ja() ? '画面を消す' : 'clear the screen'] });
-      out.push({ row: ['Ctrl+C', ja() ? '入力を取り消す' : 'cancel the line'] });
+      out = out.concat(shortcutRows());
+      out.push('');
+      return out;
+    }
+  });
+
+  def('manual', {
+    group: 'info',
+    usage: 'manual [command]',
+    desc: {
+      ja: '全コマンドの使い方を一覧で読む',
+      en: 'the full reference: every command and how to use it'
+    },
+    run: function (args) {
+      // 引数があれば、その 1 つだけを man と同じ形で見せる
+      if (args.length) return registry.man.run(args);
+
+      var out = head(ja() ? '取扱説明' : 'manual');
+      out.push([{ t: ja()
+        ? 'すべてのコマンドと、その使い方です。1 つだけ見たいときは man <名前>。'
+        : 'Every command and how to use it. For just one, use man <name>.', c: 'dim' }], '');
+
+      var groups = groupLabels();
+      Object.keys(groups).forEach(function (g) {
+        var names = Object.keys(registry).filter(function (n) {
+          return (registry[n].group || 'sys') === g;
+        });
+        if (!names.length) return;
+
+        out.push([{ t: '[' + groups[g] + ']', c: 'accent-2 bold' }]);
+        names.forEach(function (name) {
+          var c = registry[name];
+          var title = [{ t: '  ' + (c.usage || name), c: 'accent' }];
+          if (c.hidden) title.push({ t: ja() ? '   （隠しコマンド）' : '   (hidden)', c: 'dim' });
+          out.push(title);
+          out.push([{ t: '      ' + t(c.desc) }]);
+          if (EXAMPLES[name] && EXAMPLES[name].length > 1) {
+            out.push([{ t: '      ' + (ja() ? '例: ' : 'e.g. ') + EXAMPLES[name].join('   '), c: 'dim' }]);
+          }
+        });
+        out.push('');
+      });
+
+      // 別名
+      out.push([{ t: '[' + (ja() ? '別名' : 'aliases') + ']', c: 'accent-2 bold' }]);
+      out.push({ block: { cls: 'alias-grid', lines: Object.keys(ALIAS).sort().map(function (a) {
+        return [{ t: a, c: 'accent' }, { t: ' → ' + ALIAS[a], c: 'dim' }];
+      }) } });
+      out.push('');
+
+      // キー操作
+      out.push([{ t: '[' + ui('shortcuts') + ']', c: 'accent-2 bold' }]);
+      out = out.concat(shortcutRows());
+      out.push('');
+
+      // 書き方の約束
+      out.push([{ t: '[' + (ja() ? '読み方' : 'notation') + ']', c: 'accent-2 bold' }]);
+      out.push({ row: ['<...>', ja() ? '必ず書くもの' : 'required'] });
+      out.push({ row: ['[...]', ja() ? '省いてもよいもの' : 'optional'] });
+      out.push({ row: ['a|b', ja() ? 'どちらかを選ぶ' : 'choose one'] });
       out.push('');
       return out;
     }
@@ -522,7 +612,10 @@
   /* エイリアス */
   var ALIAS = {
     dir: 'ls', 'll': 'ls', 'cls': 'clear', 'h': 'help', '?': 'help',
-    links: 'contact', me: 'about', work: 'projects', logo: 'banner', ja: 'lang ja', en: 'lang en'
+    links: 'contact', me: 'about', work: 'projects', logo: 'banner',
+    ja: 'lang ja', en: 'lang en',
+    usage: 'manual', commands: 'manual', guide: 'manual',
+    'ヘルプ': 'help', '使い方': 'manual'
   };
 
   /* ---------- 実行 ------------------------------------------------------ */
@@ -638,7 +731,7 @@
     else if (cmd === 'theme') list = TB.themes.filter(function (n) { return n.indexOf(cur) === 0; });
     else if (cmd === 'lang') list = ['ja', 'en'].filter(function (n) { return n.indexOf(cur) === 0; });
     else if (cmd === 'crt') list = ['on', 'off'].filter(function (n) { return n.indexOf(cur) === 0; });
-    else if (cmd === 'man') list = Object.keys(registry).filter(function (n) { return n.indexOf(cur) === 0; });
+    else if (cmd === 'man' || cmd === 'manual') list = Object.keys(registry).filter(function (n) { return n.indexOf(cur) === 0; });
     else if (cmd === 'open') {
       list = (C.contact || []).map(function (c) { return c.label; })
         .concat((C.projects || []).filter(function (p) { return p.url; }).map(function (p) { return TB.slug(p.name); }))

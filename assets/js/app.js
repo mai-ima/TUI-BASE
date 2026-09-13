@@ -71,7 +71,8 @@
     { cmd: 'skills', key: '03' },
     { cmd: 'contact', key: '04' },
     { cmd: 'ls', key: '05' },
-    { cmd: 'help', key: '06' }
+    { cmd: 'help', key: '06' },
+    { cmd: 'manual', key: '07' }
   ];
 
   var NAV3 = [

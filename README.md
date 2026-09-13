@@ -10,6 +10,7 @@ guest@tui-base:~$ help
 ## できること
 
 - **コマンド入力** — `help` `about` `projects` `skills` `contact` など
+- **使い方の早見表** — `manual` で全コマンドの書式・使用例・別名・キー操作をまとめて表示
 - **仮想ファイルシステム** — `ls` `cd` `cat` `tree` `pwd`
 - **入力補助** — Tab 補完、`↑`/`↓` で履歴、`→` で候補の確定、打ち間違いの候補提示
 - **テーマ 5 種** — `theme midnight | amber | matrix | synth | paper`（選択は保存されます）
@@ -21,6 +22,9 @@ guest@tui-base:~$ help
 - JavaScript が無効でも、主要な文章は `<noscript>` で読めます
 
 キー操作: `Tab` 補完 / `↑` `↓` 履歴 / `Ctrl+L` 画面消去 / `Ctrl+C` 入力取消 / `Ctrl+U` 行削除
+
+`help` は名前と一行説明の一覧、`manual` は書式（`<必須>` `[省略可]` `a|b`）と使用例まで含む
+全コマンドの説明です。1 つだけ読みたいときは `man <名前>` または `manual <名前>`。
 
 ## 遊ぶ
 
