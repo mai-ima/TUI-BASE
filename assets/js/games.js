@@ -828,14 +828,14 @@
       Object.keys(TB.commands).forEach(function (name) {
         var c = TB.commands[name];
         if ((c.group || '') !== 'game' || c.hidden || name === 'games') return;
-        out.push({ row: [[{ t: c.usage || name, c: 'accent' }], t(c.desc)] });
+        out.push({ row: [[{ t: c.usage || name, c: 'accent' }], TB.t(c.desc)] });
       });
       out.push('');
 
       var rows = [];
       RECORDS.forEach(function (r) {
         var v = TB.store.get('best:' + r[0], null);
-        if (v !== null) rows.push({ row: [r[1], v + t(r[2])] });
+        if (v !== null) rows.push({ row: [r[1], v + TB.t(r[2])] });
       });
       var ttt = TB.store.get('ttt', null);
       if (ttt) {
