@@ -889,3 +889,33 @@ body.upside .tui { transform: rotate(180deg); }
   padding: var(--pad);
 }
 .nojs h1 { color: var(--accent); font-size: 1.2em; }
+
+/* ---------- GUI / TUI の切り替え ---------- */
+.win-btn.mode { width: auto; padding: 0 .5em; font-size: .75em; letter-spacing: .05em; }
+.st-ui {
+  font: inherit; color: var(--accent); background: transparent;
+  border: 1px solid var(--border); border-radius: 3px; padding: 0 .5em; cursor: pointer;
+}
+.st-ui:hover { border-color: var(--accent); }
+body.ui-tui .st-ui { color: var(--bg); background: var(--accent); border-color: var(--accent); }
+
+/* 設定（文字版） */
+.tset { display: inline-block; min-width: min(100%, 34em); }
+.tset-row { display: flex; gap: 1em; padding: 0 .25em; cursor: pointer; white-space: pre; }
+.tset-row.on { background: var(--sel, rgba(127,127,127,.18)); }
+.tset-row.on .tset-val { color: var(--accent); font-weight: bold; }
+.tset-cur { color: var(--accent); }
+.tset-label { min-width: 9em; color: var(--dim); }
+
+/* お絵かき（文字版） */
+.tpal { margin-bottom: .4em; cursor: pointer; display: flex; flex-wrap: wrap; }
+.tpal-sw { white-space: pre; }
+.tpal-sw.on { font-weight: bold; }
+.tpaint { line-height: 1; white-space: pre; cursor: crosshair; user-select: none; touch-action: none; overflow-x: auto; }
+.tp-cur { color: var(--accent); outline: 1px solid var(--accent); }
+
+/* 電卓（文字版） */
+.tcalc { white-space: pre; line-height: 1.15; user-select: none; }
+.tc-key { cursor: pointer; }
+.tc-key:hover { color: var(--accent); }
+.tc-on { color: var(--bg); background: var(--accent); }

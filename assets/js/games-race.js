@@ -440,6 +440,7 @@
     };
     function onDown(key) {
       if (closed) return;
+      if (key === 'm' || key === 'M') { switchMode(); return; }
       if (key === 'p' || key === 'P') { if (state === 'race' || state === 'count') { paused = !paused; last = null; } return; }
       if (key === 'Enter' && state === 'results') { next(); return; }
       if (KEYMAP[key]) keys[KEYMAP[key]] = true;
@@ -465,15 +466,16 @@
     }
 
     var titleText = 'TUI RACING — ' + TB.t(T.spec.name) + (cfg.career ? L('  [選手権 第 ' + cfg.career.round + ' 戦]', '  [championship round ' + cfg.career.round + ']') : '');
-    var keysHint = L('←→ ハンドル  ↑ アクセル  ↓ ブレーキ  スペース ニトロ  p 一時停止  q やめる',
-                     '←→ steer  ↑ accelerate  ↓ brake  space nitro  p pause  q quit');
+    var keysHint = L('←→ ハンドル  ↑ アクセル  ↓ ブレーキ  スペース ニトロ  p 一時停止  m ' + (tui ? 'GUI' : 'TUI') + ' へ  q やめる',
+                     '←→ steer  ↑ accelerate  ↓ brake  space nitro  p pause  m to ' + (tui ? 'GUI' : 'TUI') + '  q quit');
     var win = null, g = null, s = null, view = null;
 
     if (!tui) {
       /* --- GUI: 窓と Canvas --- */
       win = TB.Win.open({
         title: titleText, width: 860, maximized: true, bodyClass: 'race-body',
-        onClose: function () { finish('closed'); }
+        onClose: function () { finish('closed'); },
+        toTui: function () { switchMode(); }
       });
       var cv = document.createElement('canvas');
       cv.width = W; cv.height = H; cv.className = 'race-canvas';
@@ -1243,7 +1245,21 @@
       raf = requestAnimationFrame(frame);
     }
 
+    /* GUI ⇄ TUI の切り替え。描き方が違うので、同じ設定でスタートからやり直す */
+    function switchMode() {
+      if (closed) return;
+      stop();
+      if (tui) s.end([[{ t: L('GUI 版に切り替えます…', 'Switching to the GUI…'), c: 'dim' }]]);
+      else { TB.Term.release(); win.close(); TB.Term.printAll([[{ t: L('文字版に切り替えます…', 'Switching to text mode…'), c: 'dim' }]]); }
+      var again = {};
+      for (var k in cfg) again[k] = cfg[k];
+      again.tui = !tui;
+      setTimeout(function () { startRace(again); }, 0);
+    }
+    if (tui && TB.Win) TB.Win.setTuiApp({ toGui: switchMode });
+
     function stop() {
+      if (tui && TB.Win) TB.Win.setTuiApp(null);
       closed = true;
       cancelAnimationFrame(raf);
       eng.stop();
@@ -1304,7 +1320,7 @@
         { t: '  ' + '★'.repeat(t.diff) + '☆'.repeat(3 - t.diff), c: 'warn' },
         { t: L('   ベスト ', '   best ') + fmt(b), c: 'dim' },
         { t: '   ' },
-        { t: 'GUI', cmd: 'race ' + id, c: 'accent-2' },
+        { t: 'GUI', cmd: 'race gui ' + id, c: 'accent-2' },
         { t: ' / ' , c: 'dim' },
         { t: L('文字版', 'text'), cmd: 'race tui ' + id, c: 'accent-2' }
       ]);
@@ -1458,17 +1474,15 @@
 
   def('race', {
     group: 'game',
-    usage: 'race [tui] [coast|ridge|city|career|shop|stats] [easy|normal|hard] [周回数]',
+    usage: 'race [gui|tui] [coast|ridge|city|career|shop|stats] [easy|normal|hard] [周回数]',
     desc: { ja: '疑似 3D のレース。選手権・賞金・改造つき（GUI）', en: 'pseudo-3D racing with championship, prize money and upgrades (GUI)' },
     run: function (args) {
       // tui / text が入っていれば文字版で走る
-      var tui = false;
-      args = args.filter(function (x) {
-        if (/^(tui|text)$/i.test(x)) { tui = true; return false; }
-        return true;
-      });
+      // tui / text なら文字版、gui なら窓。指定がなければ ui の設定に従う
+      var m = TB.Win ? TB.Win.modeArgs(args) : { tui: false, args: args };
+      var tui = m.tui;
+      args = m.args;
       var a = (args[0] || '').toLowerCase();
-      if (!a && tui) a = 'coast';
       if (!a) return menu();
       if (a === 'shop' || a === 'garage') return shop();
       if (a === 'stats') return stats();
@@ -1488,7 +1502,7 @@
     group: 'game',
     usage: 'tuirace [coast|ridge|city|career] [easy|normal|hard] [周回数]',
     desc: { ja: 'レースの TUI 版。同じコースを文字だけで走る', en: 'the text-mode racer: same tracks, drawn in characters' },
-    run: function (args) { return TB.commands.race.run(['tui'].concat(args)); }
+    run: function (args) { return TB.commands.race.run((args.length ? args : ['coast']).concat(['tui'])); }
   });
 
   TB.raceBest = function () {

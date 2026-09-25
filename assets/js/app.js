@@ -90,6 +90,7 @@
     { cmd: 'lang', key: 'L', label: { ja: 'lang (en)', en: 'lang (ja)' } },
     { cmd: 'crt', key: 'C' },
     { cmd: 'settings', key: 'S' },
+    { cmd: 'ui', key: 'U', label: { ja: 'ui (gui⇄tui)', en: 'ui (gui⇄tui)' } },
     { cmd: 'clear', key: 'X' }
   ];
 
@@ -237,6 +238,8 @@
   TB.setLang = setLang;
   TB.refreshStatus = refreshStatus;
   TB.submit = submit;
+  var stUi = document.getElementById('st-ui');
+  if (stUi) stUi.addEventListener('click', function () { submit('ui'); });
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', start);

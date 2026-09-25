@@ -20,6 +20,9 @@ guest@tui-base:~$ help
 - **ゲーム 13 種** — `race` `tetris` `rogue` `snake` `2048` `mine` `sokoban` ほか（`games` で一覧）
 - **本格レースゲーム** — `race` は疑似 3D の GUI 版、`race tui`（`tuirace`）は文字だけで描く TUI 版
 - **限定的な GUI** — ドラッグで動かせるウィンドウ。`settings` `paint` `gcalc` `sound` `windows` `closeall`
+- **GUI / TUI の切り替え** — `ui`（または `ui gui` / `ui tui`、下の帯の GUI/TUI ボタン）で表示方式を切り替え。
+  レース・お絵かき・電卓・設定はどちらでも動き、ウィンドウの「TUI」ボタンか `m` キーで描きかけのまま相手側へ移ります。
+  1 回だけ逆で開くときは `race gui` `gcalc tui` のように末尾に付けます
 - **コマンド 235 個** — Windows / Unix / macOS / Linux / Android / iOS 風、文字の道具、お遊び
 - **かくれコマンド 48 個** — `help` には出さず、`manual` にだけ ◆ 印で載せています
 - **おまけ** — `neofetch` `fortune` `matrix` `cowsay` `figlet` `clock` など
