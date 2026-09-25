@@ -76,18 +76,20 @@
   ];
 
   var NAV3 = [
-    { cmd: 'tetris', key: 'G1' },
-    { cmd: 'rogue', key: 'G2' },
-    { cmd: 'snake', key: 'G3' },
-    { cmd: '2048', key: 'G4' },
-    { cmd: 'mine', key: 'G5' },
-    { cmd: 'games', key: 'G6' }
+    { cmd: 'race', key: 'G1' },
+    { cmd: 'tetris', key: 'G2' },
+    { cmd: 'rogue', key: 'G3' },
+    { cmd: 'snake', key: 'G4' },
+    { cmd: '2048', key: 'G5' },
+    { cmd: 'mine', key: 'G6' },
+    { cmd: 'games', key: 'G7' }
   ];
 
   var NAV2 = [
     { cmd: 'theme', key: 'T' },
     { cmd: 'lang', key: 'L', label: { ja: 'lang (en)', en: 'lang (ja)' } },
     { cmd: 'crt', key: 'C' },
+    { cmd: 'settings', key: 'S' },
     { cmd: 'clear', key: 'X' }
   ];
 

@@ -17,6 +17,7 @@
     TB.setLineHandler(null);
     out([[{ t: msg || L('またどうぞ。', 'Come back any time.'), c: 'dim' }], '']);
   }
+  function sfx(n) { if (TB.Sfx) TB.Sfx.play(n); }
   function isQuit(v) { return v === 'q' || v === 'quit' || v === 'exit' || v === 'やめる'; }
 
   /* =====================================================================
@@ -64,9 +65,9 @@
     var cpu = pick(HANDS).key;
     var me = hand(mine), you = hand(cpu);
     var result, cls;
-    if (mine === cpu) { rpsState.d++; result = L('あいこ', 'Draw'); cls = 'dim'; }
-    else if (me.beats === cpu) { rpsState.w++; result = L('あなたの勝ち！', 'You win!'); cls = 'accent bold'; }
-    else { rpsState.l++; result = L('あなたの負け', 'You lose'); cls = 'err'; }
+    if (mine === cpu) { rpsState.d++; result = L('あいこ', 'Draw'); cls = 'dim'; sfx('lock'); }
+    else if (me.beats === cpu) { rpsState.w++; result = L('あなたの勝ち！', 'You win!'); cls = 'accent bold'; sfx('coin'); }
+    else { rpsState.l++; result = L('あなたの負け', 'You lose'); cls = 'err'; sfx('bad'); }
 
     out([
       [{ t: L('あなた: ', 'you: '), c: 'dim' }, { t: me.art + ' ' + TB.t({ ja: me.ja, en: me.en }), c: 'accent' },
@@ -168,11 +169,13 @@
     if (s.word.indexOf(v) !== -1) {
       s.hit.push(v);
       if (s.word.split('').every(function (c) { return s.hit.indexOf(c) !== -1; })) return hangFinish(true);
+      sfx('eat');
       out(hangBoard().concat([[{ t: L('あった！', 'A hit!'), c: 'accent' }]]));
     } else {
       s.bad.push(v);
       s.miss++;
       if (s.miss >= MAX_MISS) return hangFinish(false);
+      sfx('bad');
       out(hangBoard().concat([[{ t: L('はずれ。', 'Nope.'), c: 'warn' }]]));
     }
   }
@@ -180,6 +183,7 @@
   function hangFinish(won) {
     var s = hangState;
     var lines = hangBoard();
+    sfx(won ? 'win' : 'die');
     if (won) {
       var r = K.best('hangman', MAX_MISS - s.miss, false);
       lines.push([{ t: L('正解！ ' + s.word, 'Correct! ' + s.word), c: 'accent bold' }]);
@@ -280,11 +284,11 @@
     var p = handValue(s.player), d = handValue(s.dealer);
     var lines = bjTable(false);
     var msg, cls;
-    if (p > 21) { s.l++; msg = L('バースト。あなたの負け。', 'Bust. You lose.'); cls = 'err'; }
-    else if (d > 21) { s.w++; msg = L('ディーラーがバースト。あなたの勝ち！', 'Dealer busts. You win!'); cls = 'accent bold'; }
-    else if (p > d) { s.w++; msg = L('あなたの勝ち！', 'You win!'); cls = 'accent bold'; }
-    else if (p < d) { s.l++; msg = L('あなたの負け。', 'You lose.'); cls = 'err'; }
-    else { s.d++; msg = L('引き分け。', 'Push.'); cls = 'dim'; }
+    if (p > 21) { s.l++; msg = L('バースト。あなたの負け。', 'Bust. You lose.'); cls = 'err'; sfx('bad'); }
+    else if (d > 21) { s.w++; msg = L('ディーラーがバースト。あなたの勝ち！', 'Dealer busts. You win!'); cls = 'accent bold'; sfx('coin'); }
+    else if (p > d) { s.w++; msg = L('あなたの勝ち！', 'You win!'); cls = 'accent bold'; sfx('coin'); }
+    else if (p < d) { s.l++; msg = L('あなたの負け。', 'You lose.'); cls = 'err'; sfx('bad'); }
+    else { s.d++; msg = L('引き分け。', 'Push.'); cls = 'dim'; sfx('lock'); }
     if (prefix) msg = prefix + ' ' + msg;
     lines.push([{ t: msg, c: cls }]);
     lines.push([{ t: L('通算 ' + s.w + '勝 ' + s.l + '敗 ' + s.d + '分', s.w + 'W ' + s.l + 'L ' + s.d + 'D') +
@@ -380,6 +384,7 @@
     var chosen = item.shuffled[n - 1];
     var correct = chosen === item.correct;
     if (correct) s.score++;
+    sfx(correct ? 'coin' : 'bad');
     var right = typeof item.correct === 'string' ? item.correct : TB.t(item.correct);
     out([correct
       ? [{ t: L('○ 正解！', '○ Correct!'), c: 'accent bold' }]

@@ -23,6 +23,7 @@
 
   /* ゲームなどがキー入力を丸ごと受け取っているときの受け口 */
   var captureFn = null;
+  var captureUpFn = null;     // キーを離したとき（レースのように押しっぱなしを使うゲーム用）
   var promptLabel = null;
 
   /* ---------- テキスト → DOM ------------------------------------------ */
@@ -65,6 +66,20 @@
       if (typeof seg === 'string') { target.appendChild(parse(seg)); return; }
       var span = document.createElement('span');
       if (seg.c) span.className = seg.c;
+      if (seg.cmd !== undefined) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'cmdlink' + (seg.c ? ' ' + seg.c : '');
+        btn.textContent = seg.t;
+        btn.title = String(seg.cmd);
+        btn.addEventListener('click', function (ev) {
+          ev.preventDefault();
+          if (TB.Term.isCapturing()) return;
+          if (typeof TB.submit === 'function') TB.submit(String(seg.cmd));
+        });
+        target.appendChild(btn);
+        return;
+      }
       if (seg.link) {
         var a = document.createElement('a');
         a.href = seg.link;
@@ -351,12 +366,27 @@
     });
 
     // キー入力を丸ごと横取りするモード（ゲーム用）。捕捉フェーズで先に受け取る。
+    // ただし GUI ウィンドウの中の入力欄に打っているときは邪魔しない。
+    function typingElsewhere(e) {
+      var el = e.target;
+      if (!el || el === inputEl) return false;
+      var tag = (el.tagName || '').toLowerCase();
+      return tag === 'input' || tag === 'textarea' || tag === 'select' || el.isContentEditable;
+    }
     window.addEventListener('keydown', function (e) {
       if (!captureFn) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (typingElsewhere(e)) return;
       e.preventDefault();
       e.stopPropagation();
       captureFn(e.key);
+    }, true);
+    window.addEventListener('keyup', function (e) {
+      if (!captureUpFn) return;
+      if (typingElsewhere(e)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      captureUpFn(e.key);
     }, true);
 
     window.addEventListener('keydown', function (e) {
@@ -372,8 +402,9 @@
   /* ---------- モード切り替え -------------------------------------------- */
 
   /** キー入力を handler に渡し、入力行を隠す（ゲーム中） */
-  function capture(handler) {
+  function capture(handler, upHandler) {
     captureFn = handler;
+    captureUpFn = upHandler || null;
     lineEl.hidden = true;
     var mode = document.getElementById('st-mode');
     if (mode) mode.textContent = 'GAME';
@@ -382,6 +413,7 @@
 
   function release() {
     captureFn = null;
+    captureUpFn = null;
     lineEl.hidden = false;
     var mode = document.getElementById('st-mode');
     if (mode) mode.textContent = TB.ui('ready');

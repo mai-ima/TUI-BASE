@@ -17,9 +17,11 @@ guest@tui-base:~$ help
 - **日本語 / 英語の切り替え** — `lang ja` / `lang en`
 - **CRT 風の効果** — `crt on` / `crt off`
 - **メニュー操作** — 左（スマートフォンでは上）のメニューはクリックでも動きます
-- **ゲーム 12 種** — `tetris` `rogue` `snake` `2048` `mine` `sokoban` ほか（`games` で一覧）
-- **コマンド 227 個** — Windows / Unix / macOS / Linux / Android / iOS 風、文字の道具、お遊び
-- **かくれコマンド 47 個** — `help` には出さず、`manual` にだけ ◆ 印で載せています
+- **ゲーム 13 種** — `race` `tetris` `rogue` `snake` `2048` `mine` `sokoban` ほか（`games` で一覧）
+- **本格レースゲーム** — `race` は疑似 3D の GUI 版、`race tui`（`tuirace`）は文字だけで描く TUI 版
+- **限定的な GUI** — ドラッグで動かせるウィンドウ。`settings` `paint` `gcalc` `sound` `windows` `closeall`
+- **コマンド 235 個** — Windows / Unix / macOS / Linux / Android / iOS 風、文字の道具、お遊び
+- **かくれコマンド 48 個** — `help` には出さず、`manual` にだけ ◆ 印で載せています
 - **おまけ** — `neofetch` `fortune` `matrix` `cowsay` `figlet` `clock` など
 - JavaScript が無効でも、主要な文章は `<noscript>` で読めます
 
@@ -36,12 +38,20 @@ guest@tui-base:~$ help
 
 | コマンド | 内容 |
 | --- | --- |
-| `tetris` | テトリス。7 種バッグ・ホールド・ゴースト・ハードドロップ・レベル上昇 |
+| `race` | 疑似 3D レース（GUI ウィンドウ）。3 コース・ライバル 5 台・ニトロ・スリップストリーム・損傷・キャリア・ショップ |
+| `race tui` / `tuirace` | 同じレースを文字だけで描く TUI 版（記録・キャリアは共通） |
+| `tetris` | テトリス。マラソン / `tetris sprint`（40 ライン）/ `tetris ultra`（2 分）。REN・B2B・壁蹴り |
 | `rogue` | ローグライク。自動生成の迷宮を潜り、地下 8 階の護符を持ち帰る |
-| `snake` | スネーク。食べるほど伸びて速くなる |
-| `2048` | 2048。同じ数を合わせて大きくする |
-| `mine` | マインスイーパ。`mine easy` / `normal` / `hard` |
-| `sokoban` | 倉庫番。全 8 面。`u` で一手戻す |
+| `snake` | スネーク。金の果物 ★、`snake wrap` で壁抜けモード |
+| `2048` | 2048。`u` で 3 回まで一手戻す、スワイプ対応 |
+| `mine` | マインスイーパ。クリックで開く・右クリック/長押しで旗・数字で一括オープン |
+| `sokoban` | 倉庫番。全 8 面。`u` で一手戻す、面ごとの最少手数を記録 |
+
+レースは `↑` アクセル・`↓` ブレーキ・`←` `→` ハンドル・スペース（または `n`）でニトロ、`q` でやめます。
+`race coast|ridge|city`・`easy|normal|hard`・周回数を並べて指定できます
+（例: `race city hard 5`）。`race career` で全 3 戦の選手権、賞金は `race shop` で
+エンジン・タイヤ・ニトロ・車体の強化に使えます。`race stats` で記録を確認。
+記録はすべて上位 5 件のランキングとして保存されます。
 
 操作は共通で、矢印キー（または `hjkl`）で動かし、`q` でやめます。
 テトリスは `↑` 回転・スペースでハードドロップ・`c` でホールド・`p` で一時停止、
@@ -93,7 +103,7 @@ npx vercel --prod # 本番環境
 
 ## コマンド
 
-`help` で一覧、`manual` で全 227 個の使い方（書式・例・別名）が読めます。
+`help` で一覧、`manual` で全 235 個の使い方（書式・例・別名）が読めます。
 分類は次のとおりです。
 
 | 分類 | 数 | 例 |
@@ -187,6 +197,8 @@ assets/js/games-mini.js    rps / hangman / blackjack / quiz
 assets/js/commands-extra.js  追加コマンド（Windows 風・Unix 風・文字・お遊び）
 assets/js/commands-os.js     macOS / Linux / Android / iOS 風のコマンド
 assets/js/easter-eggs.js     かくれコマンドと、コナミコマンド
+assets/js/gui.js             ウィンドウ・効果音と GUI アプリ（settings / paint / gcalc）
+assets/js/games-race.js      レースゲーム（GUI 版の canvas 描画と TUI 版の文字描画）
 assets/js/app.js        起動処理、メニュー、ステータスバー
 ```
 

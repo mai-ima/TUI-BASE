@@ -16,6 +16,7 @@
 
   function ja() { return TB.state.lang === 'ja'; }
   function L(j, e) { return ja() ? j : e; }
+  function sfx(n) { if (TB.Sfx) TB.Sfx.play(n); }
   function rnd(n) { return Math.floor(Math.random() * n); }
   function pick(a) { return a[rnd(a.length)]; }
   function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
@@ -144,7 +145,7 @@
       var hit = line && line.indexOf(i) !== -1;
       cells.push(v === 'X' ? { t: 'X', c: hit ? 'accent bold hit' : 'accent bold' }
         : v === 'O' ? { t: 'O', c: hit ? 'warn bold hit' : 'warn bold' }
-        : { t: String(i + 1), c: 'faint dim' });
+        : { t: String(i + 1), c: 'dim', cmd: 'ttt-move ' + (i + 1) });
     }
     var bar = function (l, m, r) { return [{ t: '  ' + l + '───' + m + '───' + m + '───' + r, c: 'dim' }]; };
     var row = function (i) {
@@ -161,9 +162,9 @@
 
   function tttEnd(result) {
     var out = [''];
-    if (result.who === 'draw') out.push([{ t: L('引き分け。', 'A draw.'), c: 'dim' }]);
-    else if (result.who === 'X') out.push([{ t: L('あなたの勝ち！', 'You win!'), c: 'accent bold' }]);
-    else out.push([{ t: L('CPU の勝ち。', 'The computer wins.'), c: 'err' }]);
+    if (result.who === 'draw') { out.push([{ t: L('引き分け。', 'A draw.'), c: 'dim' }]); sfx('lock'); }
+    else if (result.who === 'X') { out.push([{ t: L('あなたの勝ち！', 'You win!'), c: 'accent bold' }]); sfx('win'); }
+    else { out.push([{ t: L('CPU の勝ち。', 'The computer wins.'), c: 'err' }]); sfx('bad'); }
 
     var rec = JSON.parse(TB.store.get('ttt', '{"w":0,"l":0,"d":0}'));
     if (result.who === 'X') rec.w++; else if (result.who === 'O') rec.l++; else rec.d++;
@@ -177,7 +178,7 @@
   function tttLine(input) {
     var s = tttState;
     if (!s) return;
-    var v = input.trim().toLowerCase();
+    var v = input.trim().toLowerCase().replace(/^ttt-move\s+/, '');
 
     if (v === 'q' || v === 'quit' || v === 'n') {
       TB.setLineHandler(null);
@@ -222,6 +223,18 @@
     TB.Term.printAll(out);
   }
 
+  /* 盤面のマスをクリックしたとき用。対局中なら tttLine が先に受け取る */
+  def('ttt-move', {
+    group: 'game',
+    hidden: true,
+    usage: 'ttt-move <1-9>',
+    desc: { ja: '三目並べの盤をクリックしたときに使う内部コマンド', en: 'used when you click a tic-tac-toe cell' },
+    run: function () {
+      return [[{ t: L('その対局はもう終わっています。ttt で新しく始めてください。',
+                      'That game is over. Start a new one with ttt.'), c: 'dim' }]];
+    }
+  });
+
   def('ttt', {
     group: 'game',
     usage: 'ttt [easy|normal|hard]',
@@ -239,7 +252,7 @@
         [{ t: L('三目並べ。あなたが ', 'Tic-tac-toe. You are ') , c: '' }, { t: 'X', c: 'accent bold' },
          { t: L('、CPU が ', ', the computer is ') }, { t: 'O', c: 'warn bold' },
          { t: L('。難易度: ', '. level: ') + level, c: 'dim' }],
-        [{ t: L('置きたいマスの番号（1〜9）を入力してください。q でやめる。', 'Type the number of a cell (1–9). q to quit.'), c: 'dim' }],
+        [{ t: L('置きたいマスの番号（1〜9）を入力するか、マスをクリックしてください。q でやめる。', 'Type a cell number (1–9) or click a cell. q to quit.'), c: 'dim' }],
         ''
       ].concat(tttBoard(tttState.board, null), ['']);
     }
@@ -558,12 +571,14 @@
       G.atk += 1;
       if (G.lv % 2 === 0) G.def += 1;
       msg(L('レベル ' + G.lv + ' に上がった！', 'Welcome to level ' + G.lv + '!'), 'accent bold');
+      sfx('win');
     }
   }
 
   function attack(m) {
     var dmg = damage(G.atk, m.def);
     m.hp -= dmg;
+    sfx('hit');
     if (m.hp > 0) {
       msg(L(monsterName(m) + ' に ' + dmg + ' のダメージ。', 'You hit the ' + monsterName(m) + ' for ' + dmg + '.'), '');
       return;
@@ -579,9 +594,11 @@
     here.forEach(function (i) {
       G.items = G.items.filter(function (o) { return o !== i; });
       if (i.kind === 'gold') {
+        sfx('coin');
         G.gold += i.amount;
         msg(L(i.amount + ' ゴールドを拾った。', 'You pick up ' + i.amount + ' gold.'), 'g-gold');
       } else if (i.kind === 'potion') {
+        sfx('eat');
         G.potions++;
         msg(L('薬を拾った（p で飲む）。持ち物: ' + G.potions, 'You pick up a potion (p to drink). You carry ' + G.potions + '.'), 'accent');
       } else if (i.kind === 'weapon') {
@@ -603,6 +620,7 @@
       if (dist === 1) {
         var dmg = damage(m.atk, G.def);
         G.hp -= dmg;
+        sfx('hurt');
         msg(L(monsterName(m) + ' の攻撃！ ' + dmg + ' のダメージ。', 'The ' + monsterName(m) + ' hits you for ' + dmg + '.'), 'err');
         if (G.hp <= 0) { G.dead = true; }
         return;
@@ -635,6 +653,7 @@
   function descend() {
     if (G.depth >= MAX_DEPTH) return;
     enterLevel(G.depth + 1);
+    sfx('lap');
     msg(L('階段を降りた。地下 ' + G.depth + ' 階。', 'You descend to depth ' + G.depth + '.'), 'accent-2');
   }
 
@@ -710,9 +729,9 @@
     else if (key === '.' || key === ' ' || key === '5') msg(L('ひと息ついた。', 'You wait.'), 'dim');
     else return;
 
-    if (G.won) { draw(); finish('won'); return; }
+    if (G.won) { draw(); sfx('win'); finish('won'); return; }
     monstersTurn();
-    if (G.dead) { draw(); finish('dead'); return; }
+    if (G.dead) { draw(); sfx('die'); finish('dead'); return; }
     G.turn++;
     if (G.turn % 8 === 0 && G.hp < G.maxhp) G.hp++;   // ゆっくり回復
     draw();
@@ -803,8 +822,17 @@
   /* --- ゲーム一覧 ------------------------------------------------------ */
 
   /* 記録の読み方: [保存キー, 表示名, 単位] */
+  function fmtMs(v) {
+    v = parseInt(v, 10);
+    var m = Math.floor(v / 60000), s = Math.floor(v % 60000 / 1000), c = Math.floor(v % 1000 / 10);
+    return m + ':' + (s < 10 ? '0' : '') + s + '.' + (c < 10 ? '0' : '') + c;
+  }
+
   var RECORDS = [
     ['tetris', 'tetris', { ja: ' 点', en: ' points' }],
+    ['tetris-sprint', 'tetris sprint', { ja: '', en: '' }, fmtMs],
+    ['tetris-ultra', 'tetris ultra', { ja: ' 点', en: ' points' }],
+    ['snake-wrap', 'snake wrap', { ja: ' 点', en: ' points' }],
     ['rogue', 'rogue', { ja: ' 点', en: ' points' }],
     ['snake', 'snake', { ja: ' 点', en: ' points' }],
     ['2048', '2048', { ja: ' 点', en: ' points' }],
@@ -825,17 +853,22 @@
         ? '遊びたいものの名前を入力してください。記録はこの端末に残ります。'
         : 'Type the name of the one you want. Records are kept in this browser.', c: 'dim' }], '');
 
-      Object.keys(TB.commands).forEach(function (name) {
+      var FIRST = ['race', 'tetris', 'rogue', 'snake', '2048', 'mine', 'sokoban'];
+      var names = Object.keys(TB.commands).sort(function (a, b) {
+        var ia = FIRST.indexOf(a), ib = FIRST.indexOf(b);
+        return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+      });
+      names.forEach(function (name) {
         var c = TB.commands[name];
         if ((c.group || '') !== 'game' || c.hidden || name === 'games') return;
-        out.push({ row: [[{ t: c.usage || name, c: 'accent' }], TB.t(c.desc)] });
+        out.push({ row: [[{ t: name, cmd: name, c: 'accent' }], TB.t(c.desc)] });
       });
       out.push('');
 
       var rows = [];
       RECORDS.forEach(function (r) {
         var v = TB.store.get('best:' + r[0], null);
-        if (v !== null) rows.push({ row: [r[1], v + TB.t(r[2])] });
+        if (v !== null) rows.push({ row: [r[1], (r[3] ? r[3](v) : v) + TB.t(r[2])] });
       });
       var ttt = TB.store.get('ttt', null);
       if (ttt) {
@@ -844,6 +877,8 @@
           rows.push({ row: ['ttt', L(rec.w + ' 勝 ' + rec.l + ' 敗 ' + rec.d + ' 分', rec.w + 'W ' + rec.l + 'L ' + rec.d + 'D')] });
         } catch (e) { /* ignore */ }
       }
+      var laps = TB.raceBest ? TB.raceBest() : [];
+      laps.forEach(function (x) { rows.push({ row: ['race ' + x[0], L('ベストラップ ', 'best lap ') + x[1]] }); });
       if (rows.length) {
         out.push([{ t: L('あなたの記録', 'your records'), c: 'accent-2' }]);
         out = out.concat(rows);

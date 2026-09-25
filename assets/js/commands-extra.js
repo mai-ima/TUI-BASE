@@ -1243,6 +1243,8 @@
     return val;
   }
 
+  TB.calcExpr = calc;
+
   def('calc', {
     group: 'text',
     usage: 'calc <式>',

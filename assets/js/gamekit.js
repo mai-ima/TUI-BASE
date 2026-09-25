@@ -30,6 +30,28 @@
     return { best: better ? value : cur, updated: better };
   }
 
+  /**
+   * 上位 5 件のランキングに記録する。{ rank: 入った順位 (0 なら圏外), list: [...] }
+   * best:<key> も最上位の値で更新しておく（games の一覧が読む）。
+   */
+  function record(key, value, lower) {
+    var list = [];
+    try { list = JSON.parse(TB.store.get('top:' + key, '[]')) || []; } catch (e) { list = []; }
+    var entry = { v: value, d: Date.now() };
+    list.push(entry);
+    list.sort(function (a, b) { return lower ? a.v - b.v : b.v - a.v; });
+    list = list.slice(0, 5);
+    TB.store.set('top:' + key, JSON.stringify(list));
+    TB.store.set('best:' + key, String(list[0].v));
+    return { rank: list.indexOf(entry) + 1, list: list };
+  }
+
+  function topList(key) {
+    try { return JSON.parse(TB.store.get('top:' + key, '[]')) || []; } catch (e) { return []; }
+  }
+
+  function sfx(name) { if (TB.Sfx) TB.Sfx.play(name); }
+
   function readBest(key) {
     var v = parseInt(TB.store.get('best:' + key, ''), 10);
     return isNaN(v) ? null : v;
@@ -198,25 +220,61 @@
 
     session.promise = new Promise(function (resolve) { session.resolve = resolve; });
 
-    TB.Term.capture(session.key);
-    // 画面の高さを使うので、枠の頭が見えるところまでスクロールする
-    if (box.scrollIntoView) box.scrollIntoView({ block: 'start' });
-    else TB.Term.scroll();
+    /* スマートフォンのスワイプを矢印キーとして渡す */
+    if (opts.swipe) {
+      var sx = 0, sy = 0, st = 0;
+      box.addEventListener('touchstart', function (e) {
+        if (e.target.closest('button')) return;
+        var t = e.changedTouches[0]; sx = t.clientX; sy = t.clientY; st = Date.now();
+      }, { passive: true });
+      box.addEventListener('touchend', function (e) {
+        if (e.target.closest('button') || !st) return;
+        var t = e.changedTouches[0], dx = t.clientX - sx, dy = t.clientY - sy;
+        st = 0;
+        if (Math.max(Math.abs(dx), Math.abs(dy)) < 24) return;
+        session.key(Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'ArrowRight' : 'ArrowLeft') : (dy > 0 ? 'ArrowDown' : 'ArrowUp'));
+      });
+      box.style.touchAction = 'none';
+    }
+
+    TB.Term.capture(session.key, opts.onKeyUp ? function (k) { if (!ended) opts.onKeyUp(k, session); } : null);
+    // 画面の高さを使うので、枠の頭が見えるところまでスクロールする。
+    // 盤面は open() のあとで描かれるので、1 コマ待ってから（枠が本来の高さになってから）。
+    requestAnimationFrame(function () {
+      if (box.scrollIntoView) box.scrollIntoView({ block: 'start' });
+      else TB.Term.scroll();
+    });
     return session;
   }
 
-  /** 終了時に出す成績表 */
-  function scoreLines(title, rows, key, value, lower) {
-    var r = best(key, value, lower);
+  /** 終了時に出す成績表（上位 5 件のランキングつき）。fmt で値の見せ方を変えられる */
+  function scoreLines(title, rows, key, value, lower, fmt) {
+    fmt = fmt || function (v) { return String(v); };
     var out = [[{ t: title, c: 'accent bold' }]];
     rows.forEach(function (row) { out.push({ row: [row[0], String(row[1])] }); });
-    out.push({ row: [L('最高記録', 'best'), String(r.best) + (r.updated ? L('（更新！）', ' (new!)') : '')] });
+    // 0 点（すぐやめた等）はランキングに載せない
+    if (!lower && !value) {
+      var top = topList(key);
+      if (top.length) out.push([{ t: L('自己最高: ', 'best: ') + fmt(top[0].v), c: 'dim' }]);
+      return out;
+    }
+    var r = record(key, value, lower);
+    if (r.rank === 1) { out.push([{ t: L('★ 自己最高記録です！', '★ A new personal best!'), c: 'accent bold' }]); sfx('win'); }
+    else if (r.rank) out.push([{ t: L('ランキング ' + r.rank + ' 位に入りました。', 'You placed #' + r.rank + ' on your board.'), c: 'accent-2' }]);
+    out.push([{ t: L('— ベスト 5 —', '— top 5 —'), c: 'dim' }]);
+    r.list.forEach(function (e, i) {
+      var mine = i === r.rank - 1;
+      var d = new Date(e.d);
+      out.push({ row: [[{ t: '  ' + (i + 1) + '.', c: mine ? 'accent bold' : 'dim' }],
+                       [{ t: fmt(e.v), c: mine ? 'accent bold' : '' },
+                        { t: '   ' + (d.getMonth() + 1) + '/' + d.getDate() + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'), c: 'dim' }]] });
+    });
     return out;
   }
 
   TB.Kit = {
     L: L, ja: ja, rnd: rnd, pick: pick, clamp: clamp,
-    best: best, readBest: readBest, isTouch: isTouch,
+    best: best, readBest: readBest, isTouch: isTouch, record: record, topList: topList, sfx: sfx,
     renderGrid: renderGrid, renderParts: renderParts, bar: bar,
     open: open, scoreLines: scoreLines
   };

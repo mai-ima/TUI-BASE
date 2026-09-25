@@ -441,6 +441,7 @@ a:hover, a:focus-visible { color: var(--accent); }
 .p-j { color: var(--p-j); }
 .p-l { color: var(--p-l); }
 .p-empty { color: var(--faint); }
+.p-flash { color: #fff; text-shadow: 0 0 8px #fff; }
 .p-ghost { color: var(--dim); }
 
 /* 2048 のタイル */
@@ -467,6 +468,9 @@ a:hover, a:focus-visible { color: var(--accent); }
 .m7 { color: var(--fg); }
 .m8 { color: var(--dim); }
 .cur { background: var(--sel); }
+.m-grid .mc { cursor: pointer; }
+.m-grid .mc:not(.opened):hover { background: var(--bg-pane); }
+.m-grid .m0 { color: var(--faint); }
 
 /* スマートフォン用の方向キー */
 .g-pad {
@@ -626,6 +630,231 @@ body.crt-on .screen { text-shadow: var(--glow); }
   .caret { animation: none; }
   * { transition-duration: .01ms !important; }
 }
+
+/* ---------- クリックで実行できるコマンド ------------------------------ */
+.cmdlink {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  border-bottom: 1px dashed currentColor;
+  padding: 0;
+  cursor: pointer;
+}
+.cmdlink:hover, .cmdlink:focus-visible { color: var(--accent); background: var(--bg-inset); }
+.cmdlink.dim { border-bottom-style: dotted; }
+
+/* ---------- GUI: ウィンドウ -------------------------------------------- */
+.win {
+  position: fixed;
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100dvh - 16px);
+  background: var(--bg-pane);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, .45), 0 0 0 1px rgba(0, 0, 0, .2);
+  overflow: hidden;
+}
+.win.active { border-color: var(--accent); }
+.win.max {
+  left: var(--pad) !important;
+  top: var(--pad) !important;
+  width: calc(100vw - 2 * var(--pad)) !important;
+  height: calc(100dvh - 2 * var(--pad)) !important;
+  max-width: none;
+  max-height: none;
+  border-radius: 0;
+}
+.win-bar {
+  display: flex;
+  align-items: center;
+  gap: 1ch;
+  padding: .3em .5ch .3em 1.5ch;
+  background: var(--bg-inset);
+  border-bottom: 1px solid var(--border);
+  cursor: move;
+  user-select: none;
+  touch-action: none;
+}
+.win.max .win-bar { cursor: default; }
+.win-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--accent); }
+.win-btns { display: flex; gap: 4px; }
+.win-btn {
+  font: inherit;
+  width: 2.2em;
+  line-height: 1.4;
+  color: var(--dim);
+  background: var(--bg-pane);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  cursor: pointer;
+}
+.win-btn:hover { color: var(--fg); border-color: var(--accent); }
+.win-btn.close:hover { color: #fff; background: var(--err); border-color: var(--err); }
+.win-body { flex: 1; min-height: 0; overflow: auto; padding: 1em 1.5ch; }
+
+/* GUI の部品 */
+.gsec { margin-bottom: .9em; }
+.glabel { color: var(--dim); margin-bottom: .3em; }
+.grow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.gbtn {
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: .25em 1.2ch;
+  cursor: pointer;
+}
+.gbtn:hover, .gbtn:focus-visible { border-color: var(--accent); color: var(--accent); }
+.gbtn.on { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+.gbtn.accent { border-color: var(--accent); color: var(--accent); }
+.gbtn.warn { border-color: var(--err); color: var(--err); }
+.gbtn.warn:hover { background: var(--err); color: #fff; }
+.grange { width: min(100%, 260px); accent-color: var(--accent); }
+.ghint { color: var(--dim); font-size: .9em; margin-top: .6em; }
+.gconfirm {
+  margin-top: .8em;
+  padding: .8em 1.5ch;
+  border: 1px solid var(--err);
+  border-radius: 4px;
+  background: var(--bg-inset);
+}
+.gconfirm .grow { margin-top: .6em; }
+
+/* paint */
+.gpal { display: flex; flex-wrap: wrap; gap: 4px; margin: .6em 0; }
+.gswatch { width: 1.8em; height: 1.8em; border: 2px solid var(--border); border-radius: 3px; cursor: pointer; padding: 0; }
+.gswatch.on { border-color: var(--fg); box-shadow: 0 0 0 2px var(--accent); }
+.pcanvas-wrap { overflow: auto; }
+.pcanvas {
+  display: block;
+  width: min(100%, calc(52dvh * var(--ar, 1.6)));
+  max-width: 100%;
+  margin: 0 auto;
+  image-rendering: pixelated;
+  border: 1px solid var(--border);
+  cursor: crosshair;
+  touch-action: none;
+}
+
+/* gcalc */
+.gcalc-disp {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: .4em 1ch;
+  text-align: right;
+  margin-bottom: .7em;
+}
+.gcalc-expr { color: var(--dim); min-height: 1.4em; overflow-wrap: anywhere; }
+.gcalc-val { font-size: 1.6em; color: var(--accent); overflow-wrap: anywhere; }
+.gcalc-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.gcalc-grid .key { padding: .6em 0; font-size: 1.05em; }
+.gcalc-grid .op { color: var(--accent-2); }
+
+/* ---------- レース ------------------------------------------------------ */
+.race-body { display: flex; flex-direction: column; align-items: center; gap: .4em; padding: .6em; background: #05070c; }
+.race-canvas {
+  display: block;
+  width: 100%;
+  max-width: calc((100dvh - 9em) * 16 / 9);
+  aspect-ratio: 16 / 9;
+  flex: 0 0 auto;
+  height: auto;
+  image-rendering: pixelated;
+  background: #000;
+  border-radius: 4px;
+  touch-action: none;
+}
+.race-hint { text-align: center; }
+.race-pad { display: none; }
+@media (hover: none) {
+  .race-hint { display: none; }
+  .race-pad {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr 1fr 1fr;
+    gap: 6px;
+    width: 100%;
+    margin-top: auto;         /* 親指の届く下端に置く */
+  }
+  .rbtn {
+    font: inherit;
+    font-weight: bold;
+    padding: 1.5em 0;
+    color: #fff;
+    background: #1b2433;
+    border: 1px solid #33415a;
+    border-radius: 8px;
+    touch-action: none;
+    user-select: none;
+  }
+  .rbtn:active { background: #2c3d58; }
+  .rbtn.up { background: #1f5c46; }
+  .rbtn.down { background: #5c1f28; }
+  .rbtn.nitro { background: #1f3d6b; }
+}
+
+/* レースの文字版。1 マスごとに背景色を塗って絵にする */
+.tr-view {
+  width: fit-content;
+  max-width: 100%;
+  margin: .4em auto;
+  line-height: 1;
+  letter-spacing: 0;
+  padding: 0;
+  overflow: hidden;
+  background: #000;
+  border-radius: 3px;
+}
+.tr-view .g-row { min-height: 1em; }
+.tr-sky { background: var(--tr-sky); }
+.tr-sky2 { background: var(--tr-sky2); }
+.tr-star { background: var(--tr-sky); color: #fff; }
+.tr-star2 { background: var(--tr-sky2); color: #fff; }
+.tr-cloud { background: var(--tr-sky); color: #fff; }
+.tr-hill { background: var(--tr-sky2); color: var(--tr-hill); }
+.tr-grass-a { background: var(--tr-grass-a); color: rgba(0, 0, 0, .25); }
+.tr-grass-b { background: var(--tr-grass-b); }
+.tr-road-a { background: var(--tr-road-a); }
+.tr-road-b { background: var(--tr-road-b); }
+.tr-lane { background: var(--tr-road-a); color: var(--tr-lane); }
+.tr-rumble-a { background: var(--tr-rumble-a); }
+.tr-rumble-b { background: var(--tr-rumble-b); }
+.tr-fin-a { background: #111; color: #eee; }
+.tr-fin-b { background: #eee; color: #111; }
+.tr-tree { color: #1f7a3a; background: var(--tr-grass-b); }
+.tr-trunk { color: #7a4a22; background: var(--tr-grass-b); }
+.tr-rock { color: #9a9a9a; background: var(--tr-grass-b); }
+.tr-pole { color: #777; background: var(--tr-grass-b); }
+.tr-light2 { color: #ffe9a3; background: var(--tr-grass-b); text-shadow: 0 0 6px #ffe9a3; }
+.tr-bld { color: #262b44; background: var(--tr-grass-b); }
+.tr-win { color: #ffd76a; background: #262b44; }
+.tr-sign { color: #e14d4d; background: #f2f2f2; font-weight: bold; }
+.tr-chev { color: #222; background: #ffd93d; font-weight: bold; }
+.tr-glass { color: #1c2433; background: var(--tr-road-b); }
+.tr-light { color: #ff3030; background: var(--tr-road-b); }
+.tr-light-d { color: #8e1c1c; background: var(--tr-road-b); }
+.tr-tyre { color: #111; background: var(--tr-road-b); }
+.tr-boost { color: #8fd3ff; background: var(--tr-road-b); }
+.tr-me { color: #5ccfa0; background: var(--tr-road-b); }
+.tr-c0 { color: #e06c75; background: var(--tr-road-b); }
+.tr-c1 { color: #ffd93d; background: var(--tr-road-b); }
+.tr-c2 { color: #56a8f5; background: var(--tr-road-b); }
+.tr-c3 { color: #a78bfa; background: var(--tr-road-b); }
+.tr-c4 { color: #ff9f43; background: var(--tr-road-b); }
+.tr-c5 { color: #4dd0e1; background: var(--tr-road-b); }
+.tr-c6 { color: #ff5fd2; background: var(--tr-road-b); }
+.tr-label { color: #fff; background: rgba(0, 0, 0, .45); font-weight: bold; }
+.tr-msg { color: #ffd93d; background: rgba(0, 0, 0, .7); font-weight: bold; }
+.tr-warn { color: #ffb74d; background: rgba(0, 0, 0, .6); font-weight: bold; }
+.tr-panel { color: #e8e8f0; background: #0b0f18; }
+.tr-panel-h { color: #ffd93d; background: #0b0f18; font-weight: bold; }
+.tr-panel-me { color: #5ccfa0; background: #0b0f18; font-weight: bold; }
 
 /* ---------- かくれコマンド用 ------------------------------------------ */
 

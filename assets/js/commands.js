@@ -108,6 +108,7 @@
     ['info', '内容', 'content'],
     ['fs', 'ファイル', 'files'],
     ['game', 'ゲーム', 'games'],
+    ['gui', 'GUI アプリ', 'GUI apps'],
     ['dos', 'コマンドプロンプト風', 'Windows / DOS'],
     ['unix', 'Unix 風', 'UNIX-style'],
     ['mac', 'macOS 風', 'macOS'],
@@ -150,6 +151,14 @@
     manual: ['manual', 'manual cat'],
     echo: ['echo hello'],
     ttt: ['ttt', 'ttt hard'],
+    race: ['race', 'race city hard 5', 'race tui', 'race career', 'race shop'],
+    tuirace: ['tuirace', 'tuirace ridge hard'],
+    tetris: ['tetris', 'tetris sprint', 'tetris ultra'],
+    snake: ['snake', 'snake wrap'],
+    settings: ['settings'],
+    paint: ['paint'],
+    gcalc: ['gcalc'],
+    sound: ['sound on', 'sound off'],
     mine: ['mine', 'mine easy', 'mine hard'],
     sokoban: ['sokoban', 'sokoban 3'],
     quiz: ['quiz', 'quiz 12'],
@@ -216,7 +225,7 @@
         if (!names.length) return;          // 隠しだけの分類は見出しも出さない
         out.push([{ t: groups[g], c: 'accent-2' }]);
         names.forEach(function (name) {
-          out.push({ row: [name, t(registry[name].desc)], sub: false });
+          out.push({ row: [[{ t: name, cmd: name }], t(registry[name].desc)], sub: false });
         });
         out.push('');
       });
