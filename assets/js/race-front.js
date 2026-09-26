@@ -543,6 +543,7 @@
     sizeCanvas();
 
     function startDemo() {
+      if (R.Music) R.Music.play('title');
       var ids = loopTracks();
       var id = ids[Math.floor(Math.random() * ids.length)];
       app.demo = R.Session({ track: id, weather: R.TRACKS[id].weather, demo: true, laps: Infinity, field: R.makeField(6, 0.95), traffic: R.TRACKS[id].traffic || 0,
@@ -815,6 +816,7 @@
 
     /* 会話シーン。背景・立ち絵（表情つき）・演出（揺れ・フラッシュ・集中線・擬音）・章タイトル・ナレーション・VS 画面 */
     function scene(lines, done) {
+      if (R.Music) R.Music.play(lines.some(function (ln) { return ln && ln.bgm === 'tension'; }) ? 'tension' : 'story');
       over.classList.remove('hidden');
       over.innerHTML = '';
       var root = el('div', 'rx-scn');
@@ -888,7 +890,9 @@
           typeInto(narr, ln.narr);
           return;
         }
+        if (ln.bgm && R.Music) { R.Music.play(ln.bgm); i++; showLine(); return; }
         if (ln.vs) {
+          if (R.Music) R.Music.play('tension');
           mode = 'vs'; box.classList.add('hide');
           vs.innerHTML = '';
           ln.vs.forEach(function (who, k) {
@@ -1401,6 +1405,8 @@
         p.appendChild(optRow(L('難易度（標準）', 'Default level'), function () { return t(R.LEVEL_NAMES[R.load().level]); }, function (d) {
           R.edit(function (s) { var ks = ['easy', 'normal', 'hard']; s.level = ks[(ks.indexOf(s.level) + d + 3) % 3]; });
         }));
+        p.appendChild(optRow(L('BGM の音量', 'Music volume'), function () { var v = R.load().bgm; v = v === undefined ? 0.6 : v; return v <= 0 ? L('なし', 'off') : Math.round(v * 10) + ' / 10'; },
+          function (d) { R.edit(function (s) { var v = s.bgm === undefined ? 0.6 : s.bgm; s.bgm = Math.round(clamp(v + d * 0.1, 0, 1) * 10) / 10; }); if (R.Music) { R.Music.refresh(); if (!R.Music.current) R.Music.play('title'); } }));
         p.appendChild(optRow(L('描画', 'Renderer'), function () { return R.load().r3d ? L('3D（WebGL・試験版）', '3D (WebGL, beta)') : L('疑似 3D（標準）', 'Pseudo-3D (default)'); },
           function () { R.edit(function (s) { s.r3d = !s.r3d; }); }));
         p.appendChild(optRow(L('効果音', 'Sound'), function () { return TB.store.get('sound', '1') === '1' ? 'ON' : 'OFF'; }, function () { TB.Sfx.set(TB.store.get('sound', '1') !== '1'); }));
@@ -1437,6 +1443,7 @@
       startRun(cfg, opts);
     }
     function startRun(cfg, opts) {
+      if (R.Music) R.Music.play(R.Music.forRace(cfg));
       prep(cfg, opts);
       app.sess = R.Session(cfg);
       app.sess.W = cv.width; app.sess.H = cv.height;
@@ -1497,6 +1504,7 @@
       var won = sum.success === true || (sum.success == null && r && r.place === 1 && r.reason !== 'eliminated' && r.reason !== 'timeout');
       var lost = sum.success === false || (r && (r.reason === 'eliminated' || r.reason === 'timeout' || r.reason === 'wrecked'));
       if (won || lost) { var st = el('div', 'rx-stamp ' + (won ? 'win' : 'lose'), won ? 'WIN' : 'LOSE'); over.appendChild(st); setTimeout(function () { st.remove(); }, 2600); if (won) sfx('win'); }
+      if (R.Music) { if (won || lost) R.Music.jingle(won ? 'win' : 'lose'); else R.Music.stop(); }
       if (sum.success !== null && sum.success !== undefined) p.appendChild(el('div', 'rx-big ' + (sum.success ? 'ok' : 'ng'), sum.success ? L('MISSION CLEAR', 'MISSION CLEAR') : L('MISSION FAILED', 'MISSION FAILED')));
       if (sum.table) {
         var tb = el('div', 'rx-table');
@@ -1564,6 +1572,7 @@
       TB.submit('race tui ' + cmd);
     }
     function cleanup() {
+      if (R.Music) R.Music.stop(true);
       detach3D();
       app.closed = true;
       cancelAnimationFrame(raf);
@@ -1628,7 +1637,9 @@
   function tuiRun(cfg, opts, done) {
     if (R.needsMap(cfg.track) && !R.Map.ready) { R.Map.load(function () { tuiRun(cfg, opts, done); }); return; }
     TB.setLineHandler(null);
+    if (R.Music) R.Music.play(R.Music.forRace(cfg));
     R.runText(cfg, function (r, why, sum) {
+      if (R.Music) R.Music.stop();
       if (!r) { out([[{ t: L('中断しました。', 'Stopped.'), c: 'dim' }], '']); if (opts.world) out(opts.world.summary().map(function (x) { return [{ t: x, c: 'accent' }]; })); if (done) done(null, null); return; }
       var lines = [''].concat([[{ t: '── ' + sum.title + ' ', c: 'accent bold' }, { t: sum.sub, c: 'dim' }]]);
       if (sum.success !== null && sum.success !== undefined) lines.push([{ t: sum.success ? 'MISSION CLEAR' : 'MISSION FAILED', c: sum.success ? 'accent bold' : 'err bold' }]);
