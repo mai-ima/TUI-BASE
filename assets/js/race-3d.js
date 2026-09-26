@@ -135,7 +135,7 @@
                [cl.x[j] + B.x * a, cl.y[j] + y1, cl.z[j] + B.z * a], [cl.x[j] + B.x * a, cl.y[j] + y0, cl.z[j] + B.z * a]];
       [0, 1, 2, 0, 2, 3, 0, 2, 1, 0, 3, 2].forEach(function (k) { pos.push(p[k][0], p[k][1], p[k][2]); cols.push(c.r, c.g, c.b); });
     }
-    var RS = RW * 1.17, G = 90, lanes = v.geom.lanes, real = !!cl.real && !!v.spec.custom;
+    var RS = RW * 1.17, G = 90, lanes = v.geom.lanes, real = !!cl.real && !!v.spec.custom, cityG = !!v.cityOn;
     var white = col('#f2f2f2'), laneC = col(pal.lane), water = col(pal.water || '#2f7fc1'), black = col('#111111');
     for (var i = 0; i < n; i++) {
       var s = segs[i];
@@ -148,7 +148,7 @@
       if (s.curb) { wall(i, -RW, 0, 0.15, col('#8a8a86')); wall(i, RW, 0, 0.15, col('#8a8a86')); }
       var wl = s.waterSide && s.waterSide !== 'right', wr = s.waterSide && s.waterSide !== 'left';
       if (s.tunnel) { quad(i, -RS - 2, -RS, 0, 0, grass); quad(i, RS, RS + 2, 0, 0, grass); }
-      else if (real) { /* 周りの地面・水面は 3D の街（City3D）が描く */ }
+      else if (cityG) { /* 周りの地面・水面は 3D の街（City3D）が描く */ }
       else {
         quad(i, -RS - G, -RS, wl ? -40 : -1.5, 0, grass);
         quad(i, RS, RS + G, 0, wr ? -40 : -1.5, grass);
@@ -276,6 +276,11 @@
             var lh = sp.kind === 'hwlamp' ? 10.5 : 8.2;
             A('cyl', 0, 0.12, lh, 0.12, '#6c7278'); A('box', lh, 2.6, 0.14, 0.14, '#6c7278', false, inward * 1.3);
             A('box', lh - 0.15, 0.9, 0.18, 0.4, v.night ? '#fff1b8' : '#d7dbe0', v.night, inward * 2.5);
+            break;
+          case 'bldg':   // 建物（サーキットのピット・ポストなど）
+            var c0 = (sp.offset + sp.off2) / 2 * RW, bw0 = Math.abs(sp.off2 - sp.offset) * RW, bd0 = sp.len * M_SEG;
+            var pc = at(cl, i + sp.len / 2), rc0 = rightOf(pc.h);
+            props.add('box', pc.x + rc0.x * c0, pc.y, pc.z + rc0.z * c0, bw0, sp.hm, bd0, pc.h, sp.c || '#dddddd');
             break;
           case 'broadleaf':
             A('cyl', 0, 0.22, 3.2, 0.22, '#4e3b2c'); A('ball', 4.6, 2.6, 2.3, 2.6, ['#3f6b3a', '#4b7a3f', '#355f33', '#56813f'][seed % 4]); break;

@@ -715,7 +715,8 @@
           item(L('オープンワールド', 'Open World'), L('浜松・東名・名古屋', 'Hamamatsu–Nagoya'), function () { go(SCREENS.world(null)); }, { icon: '🗾' }),
           item(L('アルバイト', 'Part-time Jobs'), L('タクシー・宅配・出前', 'Taxi, parcels, food'), function () { go(SCREENS.jobs()); }, { icon: '🚕' }),
           item(L('グランプリ', 'Grand Prix'), L('カップ戦', 'Cups'), function () { go(SCREENS.gp()); }, { icon: '🏆' }),
-          item(L('クイックレース', 'Quick Race'), L('コース・天気を選ぶ', 'Pick track & weather'), function () { go(SCREENS.quick()); }, { icon: '🏁' }),
+          item(L('クイックレース', 'Quick Race'), L('コース・天気を選ぶ', 'Pick track & weather'), function () { go(SCREENS.quick(false, 'all')); }, { icon: '🏁' }),
+          item(L('実在コース', 'Real Tracks'), L('鈴鹿・富士などのサーキット／榛名・碓氷などの峠／浜松の公道', 'Real circuits, mountain passes and Hamamatsu roads'), function () { go(SCREENS.quick(false, 'circuit')); }, { icon: '🗾' }),
           item(L('峠バトル', 'Touge Battle'), L('ダウンヒル 1 対 1', 'Downhill 1v1'), function () { go(SCREENS.touge()); }, { icon: '⛰' }),
           item(L('タイムアタック', 'Time Attack'), L('ゴーストと勝負', 'Beat your ghost'), function () { go(SCREENS.trackPick('time')); }, { icon: '⏱' }),
           item(L('チャレンジ', 'Challenges'), L('脱落戦・追跡など', 'Elimination, chase…'), function () { go(SCREENS.challenges()); }, { icon: '🔥' }),
@@ -1112,19 +1113,37 @@
 
     /* ---------- クイックレース ---------- */
     var quickOpt = { track: 'coast', laps: 2, level: null, weather: 'auto', mirror: false, rivals: 7 };
-    SCREENS.quick = function (casual) {
-      var tracks = R.ALL_TRACKS;
+    var CATS = [
+      { k: 'all', n: { ja: 'すべて', en: 'All' }, f: function () { return R.ALL_TRACKS; } },
+      { k: 'circuit', n: { ja: '実在のサーキット', en: 'Real circuits' }, f: function () { return R.REAL_CIRCUITS; } },
+      { k: 'touge', n: { ja: '実在の峠', en: 'Real mountain passes' }, f: function () { return R.REAL_TOUGE; } },
+      { k: 'hm', n: { ja: '浜松の公道', en: 'Hamamatsu public roads' }, f: function () { return R.REAL_ROADS; } },
+      { k: 'fic', n: { ja: 'オリジナル', en: 'Original tracks' }, f: function () { return R.ALL_TRACKS.filter(function (id) { return !R.TRACKS[id].real; }); } }
+    ];
+    SCREENS.quick = function (casual, cat) {
+      if (cat) quickOpt.cat = cat;
+      var C = CATS.filter(function (c) { return c.k === (quickOpt.cat || 'all'); })[0] || CATS[0];
+      var tracks = C.f();
+      if (tracks.indexOf(quickOpt.track) < 0) quickOpt.track = tracks[0];
       return { build: function (o) {
         var s = R.load();
         if (!quickOpt.level) quickOpt.level = s.level;
         var p = panel(casual ? L('パーティレース', 'Party Race') : L('クイックレース', 'Quick Race'), casual ? t(R.CASUAL.party.desc) : L('コース・周回・天気を選んで走る', 'Choose track, laps and weather'));
         var row = el('div', 'rx-row');
         var pv = el('div', 'rx-pv');
-        function drawPv() { pv.innerHTML = ''; pv.appendChild(preview(quickOpt.track, 400, 225, quickOpt.weather === 'auto' ? null : quickOpt.weather, quickOpt.mirror)); pv.appendChild(el('div', 'rx-s', t(R.TRACKS[quickOpt.track].desc))); }
+        function drawPv() {
+          if (R.needsMap(quickOpt.track) && !R.Map.ready) { pv.innerHTML = ''; pv.appendChild(el('div', 'rx-s', L('地図を読み込み中…', 'Loading map...'))); R.Map.load(drawPv); return; }
+          pv.innerHTML = ''; pv.appendChild(preview(quickOpt.track, 400, 225, quickOpt.weather === 'auto' ? null : quickOpt.weather, quickOpt.mirror));
+          var tr0 = R.TRACKS[quickOpt.track];
+          pv.appendChild(el('div', 'rx-s', (tr0.region ? '【' + tr0.region + '】' : '') + t(tr0.desc)));
+        }
         drawPv();
         row.appendChild(pv);
         var col = el('div', 'rx-info');
         var W2 = ['auto'].concat(Object.keys(R.WEATHERS));
+        col.appendChild(optRow(L('区分', 'Category'), function () { return t(C.n); }, function (d) {
+          var i2 = CATS.indexOf(C); C = CATS[(i2 + d + CATS.length) % CATS.length]; quickOpt.cat = C.k; tracks = C.f(); quickOpt.track = tracks[0]; drawPv();
+        }));
         col.appendChild(optRow(L('コース', 'Track'), function () { var tr = R.TRACKS[quickOpt.track]; return trackName(quickOpt.track) + ' ' + '★'.repeat(tr.diff); }, function (d) {
           quickOpt.track = tracks[(tracks.indexOf(quickOpt.track) + d + tracks.length) % tracks.length]; drawPv();
         }));
@@ -1410,6 +1429,14 @@
       app.mode = 'race'; app.paused = false; app.keyHook = null;
       sizeCanvas();
       var cfg = opts.make();
+      if (R.needsMap(cfg.track) && !R.Map.ready) {   // 浜松の公道コースは地図を読んでから
+        app.mode = 'loading';
+        R.Map.load(function () { if (app.runOpts === opts && !app.closed) { app.mode = 'race'; startRun(cfg, opts); } });
+        return;
+      }
+      startRun(cfg, opts);
+    }
+    function startRun(cfg, opts) {
       prep(cfg, opts);
       app.sess = R.Session(cfg);
       app.sess.W = cv.width; app.sess.H = cv.height;
@@ -1599,6 +1626,7 @@
 
   /** 文字版で 1 本走る。done(result, sum) */
   function tuiRun(cfg, opts, done) {
+    if (R.needsMap(cfg.track) && !R.Map.ready) { R.Map.load(function () { tuiRun(cfg, opts, done); }); return; }
     TB.setLineHandler(null);
     R.runText(cfg, function (r, why, sum) {
       if (!r) { out([[{ t: L('中断しました。', 'Stopped.'), c: 'dim' }], '']); if (opts.world) out(opts.world.summary().map(function (x) { return [{ t: x, c: 'accent' }]; })); if (done) done(null, null); return; }

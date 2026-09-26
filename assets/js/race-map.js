@@ -477,7 +477,7 @@
       // 山道のガードレール・矢印板
       if (rural > 2 && Math.abs(s.phys || 0) > 4) {
         s.rails = true;
-        if (i % 14 === 0) s.sprites.push({ kind: 'chevron', offset: (s.curve > 0 ? -1 : 1) * 1.3, dir: s.curve > 0 ? 1 : -1 });
+        if (i % 14 === 0) s.sprites.push({ kind: 'chevron', offset: (s.curve > 0 ? -1 : 1) * (1 + 1.5 / hw), dir: s.curve > 0 ? 1 : -1, city: true });
       }
       if (rural > 2 && segs[i].wp && i > 2) {
         var sl = segs[i].p2.world.y - segs[i].p1.world.y;

@@ -133,12 +133,12 @@
       s.cRoad = shade(pal.road[alt], f * (s.tunnel ? 0.8 : 1) * (wet ? 0.84 : 1));
       s.cRumble = spec.curbs ? shade(pal.rumble[alt], f) : shade(pal.road[0], f * (alt ? 1.18 : 1.14));
       if (!spec.custom) s.rails = !!spec.rails;
-      else if (!s.tunnel) {
+      else if (!s.tunnel && !spec.curbs) {
         // 実在の道: 両側の地面の色・歩道
         var fa = f * (Math.floor(i / 6) % 2 ? 1 : 0.965);
         if (GR && s.luL !== undefined) { s.cGrassL = shade(GR[s.luL] || pal.grass[0], fa); s.cGrassR = shade(GR[s.luR] || pal.grass[0], fa); }
-        if (s.urban && !spec.hwy) { s.cRumble = shade(alt ? '#a8a59d' : '#a19e96', f); s.rumW = 2.6 / (spec.geom.hw || 4); s.curb = true; }
-        else { s.cRumble = shade(alt ? '#8f9086' : '#88897f', f); s.rumW = 1.0 / (spec.geom.hw || 4); }
+        if (s.urban && !spec.hwy) { s.cRumble = shade(alt ? '#a8a59d' : '#a19e96', f); s.rumW = 2.6 / ((spec.geom && spec.geom.hw) || 4); s.curb = true; }
+        else { s.cRumble = shade(alt ? '#8f9086' : '#88897f', f); if (s.rumW === undefined) s.rumW = 1.0 / ((spec.geom && spec.geom.hw) || 4); }
       }
     });
 
@@ -764,7 +764,7 @@
         if (u > 1.2) {
           g.font = 'bold ' + Math.round(u * 1.4) + 'px ui-monospace, monospace'; g.textAlign = 'center';
           g.fillStyle = night ? '#5ccfa0' : '#222';
-          g.fillText(['TUI-BASE', '$ race', 'ZERO-DAY', 'NITRO'][sp.seed % 4], x, y - u * 4.9);
+          g.fillText(sp.real ? ['RACING', 'TIRES', 'MOTOR OIL', 'BRAKES'][sp.seed % 4] : ['TUI-BASE', '$ race', 'ZERO-DAY', 'NITRO'][sp.seed % 4], x, y - u * 4.9);
         }
         break;
       case 'grandstand':
@@ -2398,7 +2398,7 @@
         for (var lane = 1; lane < LANES; lane++, lx1 += lw1, lx2 += lw2) {
           var center = spec.twoWay && lane * 2 === LANES;
           if (!s.alt && !(center && LANES >= 4)) continue;
-          if (s.cross) continue;
+          if (s.cross || spec.noLanes) continue;
           var lc2 = center && LANES >= 4 && spec.custom ? '#f0c030' : pal.lane;
           poly(g, lx1 - l1 / 2, y1, lx1 + l1 / 2, y1, lx2 + l2 / 2, y2, lx2 - l2 / 2, y2, lc2);
         }
@@ -2556,7 +2556,7 @@
         text(g, String(Math.round(score)), 16, 50, narrow ? 16 : 20, '#ffd93d');
       } else {
         text(g, L('モード', 'MODE'), 16, 22, 10, '#9fb0c2');
-        text(g, TB.t((R.MODES[mode] || R.MINIS[mode] || { name: { ja: 'フリー走行', en: 'Free roam' } }).name).slice(0, 8), 16, 46, 12, '#fff');
+        text(g, TB.t((R.MODES[mode] || R.MINIS[mode] || { name: { ja: 'フリー走行', en: 'Free roam' } }).name).slice(0, p2p || laps !== Infinity ? 4 : 8), 16, 46, 12, '#fff');
       }
       if (p2p) {
         text(g, L('残り', 'TO GO'), narrow ? 70 : 84, 22, 10, '#9fb0c2');
