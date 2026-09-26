@@ -55,34 +55,7 @@
 
   /* ---------- 道の中心線（区間ごとの位置と向き） ---------- */
   function centerline(v, mirror) {
-    var segs = v.segs, n = segs.length, spec = v.spec;
-    if (segs[0] && segs[0].wp) {   // 実在の道・実在のコース: 地図の座標そのもの（ずれない）
-      var hx0 = new Float64Array(n + 1), px0 = new Float64Array(n + 1), pz0 = new Float64Array(n + 1), py0 = new Float64Array(n + 1);
-      for (var q = 0; q < n; q++) { var w = segs[q].wp; hx0[q] = w.h; px0[q] = w.x; pz0[q] = w.z; py0[q] = w.y; }
-      var wl = segs[n - 1].wp, loop0 = !!spec.loop;
-      if (loop0) { hx0[n] = hx0[0] + Math.round((hx0[n - 1] - hx0[0]) / (2 * Math.PI)) * 2 * Math.PI; px0[n] = px0[0]; pz0[n] = pz0[0]; py0[n] = py0[0]; }
-      else { hx0[n] = wl.h; px0[n] = wl.x + Math.sin(wl.h) * M_SEG; pz0[n] = wl.z + Math.cos(wl.h) * M_SEG; py0[n] = wl.y; }
-      return { n: n, loop: loop0, h: hx0, x: px0, z: pz0, y: py0, real: true };
-    }
-    var loop = !(spec.touge || spec.p2p || spec.noFinish || spec.stopZone || spec.finishAt);
-    var total = 0, abs = 0;
-    segs.forEach(function (s) { total += s.curve; abs += Math.abs(s.curve); });
-    var turn = loop ? (3.2 * Math.PI) / (abs || 1) : 0.0055;
-    var bias = loop ? (2 * Math.PI * (mirror ? -1 : 1) - total * turn) / n : 0;
-    var hx = new Float64Array(n + 1), px = new Float64Array(n + 1), pz = new Float64Array(n + 1), py = new Float64Array(n + 1);
-    var h = 0, x = 0, z = 0;
-    for (var i = 0; i <= n; i++) {
-      hx[i] = h; px[i] = x; pz[i] = z;
-      var s = segs[i % n];
-      py[i] = (i < n ? s.p1.world.y : segs[n - 1].p2.world.y) / 200 * M_SEG * Y_SCALE;
-      if (i < n) { h -= s.curve * turn + bias; x += Math.sin(h) * M_SEG; z += Math.cos(h) * M_SEG; }
-    }
-    if (loop) {   // 一周で元の場所に戻るよう、ずれを少しずつ配る
-      var ex = px[n], ez = pz[n];
-      for (i = 0; i <= n; i++) { px[i] -= ex * i / n; pz[i] -= ez * i / n; }
-      py[n] = py[0];
-    }
-    return { n: n, loop: loop, h: hx, x: px, z: pz, y: py };
+    return v.path || R.trackPath(v.segs, v.spec, mirror);   // エンジンが計算した形（ミニマップと同じ）
   }
 
   function at(cl, sIdx) {
@@ -104,17 +77,60 @@
     return colCache[c];
   }
 
+  /**
+   * 横にどこまで面を張ってよいか（右 = +、左 = −、m）。
+   *   ・急カーブの内側: 回転の中心を越えると面が裏返って重なるので、半径より手前まで
+   *   ・ヘアピンの隣の道・近くを通る別の区間: 間の半分まで（地面が別の道を覆わない）
+   */
+  function clearance(cl, RS) {
+    if (cl.CL && cl.CL.RS === RS) return cl.CL;
+    var n = cl.n, lp = new Float32Array(n + 1), ln = new Float32Array(n + 1), i, k;
+    var yp = new Float32Array(n + 1), yn = new Float32Array(n + 1), np_ = new Uint8Array(n + 1), nn = new Uint8Array(n + 1);   // 隣の道との間の地面の高さ
+    for (i = 0; i <= n; i++) { lp[i] = 1e4; ln[i] = 1e4; }
+    // カーブの内側
+    for (i = 1; i < n; i++) {
+      var dh = (cl.h[i + 1] - cl.h[i - 1]) / (2 * M_SEG);
+      if (Math.abs(dh) < 1e-4) continue;
+      var rad = 0.9 / Math.abs(dh);
+      for (k = -4; k <= 4; k++) { var j = i + k; if (j < 0 || j > n) continue; if (dh < 0) lp[j] = Math.min(lp[j], rad); else ln[j] = Math.min(ln[j], rad); }
+    }
+    // 近くを通る別の区間
+    var C = 25, grid = {};
+    for (i = 0; i <= n; i += 2) { var key = Math.floor(cl.x[i] / C) + ',' + Math.floor(cl.z[i] / C); (grid[key] = grid[key] || []).push(i); }
+    for (i = 0; i <= n; i++) {
+      var gx = Math.floor(cl.x[i] / C), gz = Math.floor(cl.z[i] / C), rt = rightOf(cl.h[i]);
+      for (var ax = -4; ax <= 4; ax++) for (var az = -4; az <= 4; az++) {
+        var L = grid[(gx + ax) + ',' + (gz + az)]; if (!L) continue;
+        for (k = 0; k < L.length; k++) {
+          var j2 = L[k], dj = Math.abs(j2 - i); if (cl.loop) dj = Math.min(dj, n - dj);
+          if (dj < 8) continue;
+          var ddx = cl.x[j2] - cl.x[i], ddz = cl.z[j2] - cl.z[i], d = Math.hypot(ddx, ddz);
+          // 道なりの距離に比べて近い = 折り返して戻ってきた別の区間
+          if (d > 100 || d > dj * M_SEG * 0.6) continue;
+          var side = ddx * rt.x + ddz * rt.z, lim = Math.max(RS, d / 2), my = (cl.y[j2] - cl.y[i]) / 2;
+          if (side > 0) { if (lim < lp[i]) { lp[i] = lim; yp[i] = my; np_[i] = 1; } }
+          else if (lim < ln[i]) { ln[i] = lim; yn[i] = my; nn[i] = 1; }
+        }
+      }
+    }
+    cl.CL = { lp: lp, ln: ln, yp: yp, yn: yn, np: np_, nn: nn, RS: RS };
+    return cl.CL;
+  }
+
   /* ---------- 道路のメッシュ ---------- */
   function buildRoad(v, cl, RW) {
     var THREE_ = THREE, segs = v.segs, n = cl.n, pal = v.pal;
     var pos = [], cols = [], tpos = [], tcol = [], tuv = [];
     var asph = R.tex3D('asphalt');
+    var CL = clearance(cl, RW * 1.2);
+    function lim(i, a) { return a > 0 ? Math.min(a, CL.lp[i]) : Math.max(a, -CL.ln[i]); }
     function quadT(i, a0, a1, c) {   // 写真の路面（アスファルト）
       if (!asph) { quad(i, a0, a1, 0, 0, c); return; }
       var j = cl.loop ? (i + 1) : Math.min(i + 1, n);
       var A = rightOf(cl.h[i]), B = rightOf(cl.h[j]);
-      var p = [[cl.x[i] + A.x * a0, cl.y[i], cl.z[i] + A.z * a0], [cl.x[i] + A.x * a1, cl.y[i], cl.z[i] + A.z * a1],
-               [cl.x[j] + B.x * a1, cl.y[j], cl.z[j] + B.z * a1], [cl.x[j] + B.x * a0, cl.y[j], cl.z[j] + B.z * a0]];
+      var a0i = lim(i, a0), a1i = lim(i, a1), a0j = lim(j, a0), a1j = lim(j, a1);
+      var p = [[cl.x[i] + A.x * a0i, cl.y[i], cl.z[i] + A.z * a0i], [cl.x[i] + A.x * a1i, cl.y[i], cl.z[i] + A.z * a1i],
+               [cl.x[j] + B.x * a1j, cl.y[j], cl.z[j] + B.z * a1j], [cl.x[j] + B.x * a0j, cl.y[j], cl.z[j] + B.z * a0j]];
       var uv = [[a0 / 3.5, i * M_SEG / 3.5], [a1 / 3.5, i * M_SEG / 3.5], [a1 / 3.5, (i + 1) * M_SEG / 3.5], [a0 / 3.5, (i + 1) * M_SEG / 3.5]];
       var k2 = 2.35;
       [0, 2, 1, 0, 3, 2].forEach(function (k) { tpos.push(p[k][0], p[k][1], p[k][2]); tcol.push(Math.min(1, c.r * k2), Math.min(1, c.g * k2), Math.min(1, c.b * k2)); tuv.push(uv[k][0], uv[k][1]); });
@@ -122,20 +138,44 @@
     function quad(i, a0, a1, y0, y1, c, lift) {
       var j = cl.loop ? (i + 1) : Math.min(i + 1, n);
       var A = rightOf(cl.h[i]), B = rightOf(cl.h[j]);
+      var a0i = lim(i, a0), a1i = lim(i, a1), a0j = lim(j, a0), a1j = lim(j, a1);
+      if (a0i === a1i && a0j === a1j) return;   // 全部が詰められて面がない
+      // 地面の傾き（端の高さ）は、詰めた幅に合わせて比例で
+      var f0i = a0 ? a0i / a0 : 1, f1i = a1 ? a1i / a1 : 1, f0j = a0 ? a0j / a0 : 1, f1j = a1 ? a1j / a1 : 1;
+      var yy0i = Math.abs(a0) > Math.abs(a1) ? y0 * f0i : y0, yy1i = Math.abs(a1) > Math.abs(a0) ? y1 * f1i : y1;
+      var yy0j = Math.abs(a0) > Math.abs(a1) ? y0 * f0j : y0, yy1j = Math.abs(a1) > Math.abs(a0) ? y1 * f1j : y1;
       var p = [
-        [cl.x[i] + A.x * a0, cl.y[i] + y0 + (lift || 0), cl.z[i] + A.z * a0],
-        [cl.x[i] + A.x * a1, cl.y[i] + y1 + (lift || 0), cl.z[i] + A.z * a1],
-        [cl.x[j] + B.x * a1, cl.y[j] + y1 + (lift || 0), cl.z[j] + B.z * a1],
-        [cl.x[j] + B.x * a0, cl.y[j] + y0 + (lift || 0), cl.z[j] + B.z * a0]
+        [cl.x[i] + A.x * a0i, cl.y[i] + yy0i + (lift || 0), cl.z[i] + A.z * a0i],
+        [cl.x[i] + A.x * a1i, cl.y[i] + yy1i + (lift || 0), cl.z[i] + A.z * a1i],
+        [cl.x[j] + B.x * a1j, cl.y[j] + yy1j + (lift || 0), cl.z[j] + B.z * a1j],
+        [cl.x[j] + B.x * a0j, cl.y[j] + yy0j + (lift || 0), cl.z[j] + B.z * a0j]
       ];
       [0, 2, 1, 0, 3, 2].forEach(function (k) { pos.push(p[k][0], p[k][1], p[k][2]); cols.push(c.r, c.g, c.b); });
     }
     function wall(i, a, y0, y1, c) {   // 縦の面（トンネルの壁・ガードレール）
       var j = cl.loop ? (i + 1) : Math.min(i + 1, n);
-      var A = rightOf(cl.h[i]), B = rightOf(cl.h[j]);
-      var p = [[cl.x[i] + A.x * a, cl.y[i] + y0, cl.z[i] + A.z * a], [cl.x[i] + A.x * a, cl.y[i] + y1, cl.z[i] + A.z * a],
-               [cl.x[j] + B.x * a, cl.y[j] + y1, cl.z[j] + B.z * a], [cl.x[j] + B.x * a, cl.y[j] + y0, cl.z[j] + B.z * a]];
+      var A = rightOf(cl.h[i]), B = rightOf(cl.h[j]), ai = lim(i, a), aj = lim(j, a);
+      var p = [[cl.x[i] + A.x * ai, cl.y[i] + y0, cl.z[i] + A.z * ai], [cl.x[i] + A.x * ai, cl.y[i] + y1, cl.z[i] + A.z * ai],
+               [cl.x[j] + B.x * aj, cl.y[j] + y1, cl.z[j] + B.z * aj], [cl.x[j] + B.x * aj, cl.y[j] + y0, cl.z[j] + B.z * aj]];
       [0, 1, 2, 0, 2, 3, 0, 2, 1, 0, 3, 2].forEach(function (k) { pos.push(p[k][0], p[k][1], p[k][2]); cols.push(c.r, c.g, c.b); });
+    }
+    // 道の横の地面。隣の道が近ければ、間の高さで向こうの地面とつながる。
+    // 遠くまで何もなければ、端から下へ斜面を下ろす（山の上の道が宙に浮いて見えないように）
+    function ground(i, sd, c) {
+      var j = cl.loop ? (i + 1) : Math.min(i + 1, n), pts = [];
+      [i, j].forEach(function (q) {
+        var A = rightOf(cl.h[q]), L = sd > 0 ? CL.lp[q] : CL.ln[q], nb = sd > 0 ? CL.np[q] : CL.nn[q];
+        var a0 = Math.min(RS, L), a1 = Math.min(RS + G, L), y1 = nb ? (sd > 0 ? CL.yp[q] : CL.yn[q]) : -1.5 * (a1 - a0) / G;
+        var a2 = nb ? a1 : Math.min(RS + G + 45, L), y2 = nb ? y1 : y1 - 70 * (a2 - a1) / 45;
+        pts.push([cl.x[q] + A.x * a0 * sd, cl.y[q], cl.z[q] + A.z * a0 * sd], [cl.x[q] + A.x * a1 * sd, cl.y[q] + y1, cl.z[q] + A.z * a1 * sd],
+                 [cl.x[q] + A.x * a2 * sd, cl.y[q] + y2, cl.z[q] + A.z * a2 * sd]);
+      });
+      var dark = { r: c.r * 0.8, g: c.g * 0.8, b: c.b * 0.8 };
+      [[0, 1, 4, 3, c], [1, 2, 5, 4, dark]].forEach(function (f) {
+        var P = pts, a = P[f[0]], b = P[f[1]], cc = P[f[2]], d = P[f[3]], cf = f[4];
+        var tri = sd > 0 ? [a, cc, b, a, d, cc] : [a, b, cc, a, cc, d];
+        tri.forEach(function (v) { pos.push(v[0], v[1], v[2]); cols.push(cf.r, cf.g, cf.b); });
+      });
     }
     var RS = RW * 1.17, G = 90, lanes = v.geom.lanes, real = !!cl.real && !!v.spec.custom, cityG = !!v.cityOn;
     var white = col('#f2f2f2'), laneC = col(pal.lane), water = col(pal.water || '#2f7fc1'), black = col('#111111');
@@ -152,8 +192,8 @@
       if (s.tunnel) { quad(i, -RS - 2, -RS, 0, 0, grass); quad(i, RS, RS + 2, 0, 0, grass); }
       else if (cityG) { /* 周りの地面・水面は 3D の街（City3D）が描く */ }
       else {
-        quad(i, -RS - G, -RS, wl ? -40 : -1.5, 0, grass);
-        quad(i, RS, RS + G, 0, wr ? -40 : -1.5, grass);
+        if (wl) quad(i, -RS - G, -RS, -40, 0, grass); else ground(i, -1, grass);
+        if (wr) quad(i, RS, RS + G, 0, -40, grass); else ground(i, 1, grass);
         if (wl) quad(i, -RW * 1.7 - 400, -RW * 1.7, -0.6, -0.6, water);
         if (wr) quad(i, RW * 1.7, RW * 1.7 + 400, -0.6, -0.6, water);
         if (s.cross) { quad(i, -RS - 60, -RS, 0.01, 0.01, road); quad(i, RS, RS + 60, 0.01, 0.01, road); }
@@ -229,11 +269,14 @@
 
   function placeSprites(v, cl, RW, props) {
     var U = RW * 0.12, night = v.night, dynamic = [];
-    var city = !!v.cityOn;
+    var city = !!v.cityOn, CL = clearance(cl, RW * 1.2);
     v.segs.forEach(function (s, i) {
       s.sprites.forEach(function (sp) {
         if (city && (sp.kind === 'bldg' || sp.kind === 'noisewall' || sp.gen)) return;   // 街並みは City3D が描く
-        var p = at(cl, i), r = rightOf(p.h), off = sp.offset * RW, x = p.x + r.x * off, z = p.z + r.z * off, y = p.y, rot = p.h, seed = sp.seed || i;
+        var off0 = sp.offset * RW;
+        // 道から離れた木や建物が、カーブの内側・隣の道の上に来るなら置かない
+        if (Math.abs(off0) > RW * 1.25 && Math.abs(off0) + 3 > (off0 > 0 ? CL.lp[i] : CL.ln[i])) return;
+        var p = at(cl, i), r = rightOf(p.h), off = off0, x = p.x + r.x * off, z = p.z + r.z * off, y = p.y, rot = p.h, seed = sp.seed || i;
         var u = sp.city ? 1.1 : U * (0.9 + (seed % 5) * 0.06);
         var fw = { x: Math.sin(p.h), z: Math.cos(p.h) }, inward = sp.offset > 0 ? -1 : 1;
         function A(g, dy, sx, sy, sz, c, glow, dx, dz) { props.add(g, x + (dx || 0) * r.x, y + dy, z + (dx || 0) * r.z + (dz || 0), sx, sy, sz, rot, c, glow); }

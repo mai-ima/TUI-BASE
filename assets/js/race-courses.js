@@ -77,8 +77,8 @@
       curbs: !!(D[key] && D[key].loop), noLanes: !!(D[key] && D[key].loop), touge: !(D[key] && D[key].loop) && o.touge !== false, p2p: !(D[key] && D[key].loop),
       night: !!o.night, geom: null, region: o.region,
       build: function (b) {
-        var hw = o.hw || (D[key].loop ? 6.5 : 3.3);
-        var ps = R.Map.polySpec(poly(key), { hw: hw, lanes: D[key].loop ? 3 : 2 });
+        var hw = o.hw || (D[key].loop ? 8.5 : 5.2);
+        var ps = R.Map.polySpec(poly(key), { hw: hw, lanes: D[key].loop ? 3 : 2, loop: !!D[key].loop });
         this.geom = ps.geom; b.geom = ps.geom;
         ps.build(b);
       },
@@ -106,7 +106,7 @@
 
   /* ---------- 浜松の実在の公道コース（地図データを使う） ---------- */
   var HM = {
-    hm_city: { name: { ja: '浜松市街地（駅前〜鍛冶町〜浜松城）', en: 'Hamamatsu City Streets' }, desc: { ja: '実際の街の通りを閉鎖して走る市街地コース。ビルの谷間を抜ける。', en: 'Closed-off real downtown streets between the buildings.' }, via: ['hm_eki', 'hm_kaji', 'hm_castle', 'hm_shizudai', 'hm_eki'], loop: true, diff: 3, hw: 5 },
+    hm_city: { name: { ja: '浜松市街地（駅前〜鍛冶町〜浜松城）', en: 'Hamamatsu City Streets' }, desc: { ja: '実際の街の通りを閉鎖して走る市街地コース。ビルの谷間を抜ける。', en: 'Closed-off real downtown streets between the buildings.' }, via: ['hm_eki', 'hm_kaji', 'hm_castle', 'hm_shizudai', 'hm_eki'], loop: true, diff: 3, hw: 7 },
     hm_bypass: { name: { ja: '浜名バイパス（国道1号 篠原→弁天島）', en: 'Hamana Bypass (Rt.1)' }, desc: { ja: '遠州灘沿いの高規格道路。浜名湖の橋まで全開。', en: 'A fast coastal bypass to the Lake Hamana bridges.' }, via: ['hm_shinohara', 'hm_benten'], diff: 2 },
     hm_oku: { name: { ja: '奥浜名湖 湖岸（舘山寺→気賀）', en: 'Oku-Hamanako Shore' }, desc: { ja: '浜名湖の奥を湖岸ぞいに。うなぎ屋と温泉街。', en: 'Along the inner lake shore past eel shops and onsen.' }, via: ['hm_kanzanji', 'hm_hosoe', 'hm_kiga'], diff: 3 },
     hm_tenryu: { name: { ja: '国道152号 天竜（二俣→春野）', en: 'Rt.152 Tenryu Gorge' }, desc: { ja: '天竜川の谷を上っていく山道。浜松の峠。', en: 'Up the Tenryu river gorge — Hamamatsu\'s own mountain pass.' }, via: ['hm_futamata', 'hm_haruno'], diff: 4, touge: true },
@@ -122,8 +122,16 @@
       if (!rt) continue;
       rt.hs.forEach(function (h) {
         var p = M.pts(h), e = M.edgeOf(h);
-        for (var i = pts.length ? 1 : 0; i < p.length / 3; i++) { pts.push(p[i * 3], p[i * 3 + 1], p[i * 3 + 2]); if (pts.length > 3) sts.push(e.st[Math.min(e.st.length - 1, h & 1 ? e.st.length - i : i - 1)] || 0); }
+        for (var i = pts.length ? 1 : 0; i < p.length / 3; i++) {
+          // 来た道をそのまま引き返す点（U ターン）は、戻る分を取り除く
+          var m = pts.length;
+          if (m >= 6 && Math.hypot(p[i * 3] - pts[m - 6], p[i * 3 + 1] - pts[m - 5]) < 1) { pts.length = m - 3; sts.length = Math.max(0, sts.length - 1); continue; }
+          pts.push(p[i * 3], p[i * 3 + 1], p[i * 3 + 2]); if (pts.length > 3) sts.push(e.st[Math.min(e.st.length - 1, h & 1 ? e.st.length - i : i - 1)] || 0);
+        }
       });
+    }
+    if (o.loop) {   // 一周の継ぎ目の U ターンも取り除く
+      while (pts.length > 12 && Math.hypot(pts[3] - pts[pts.length - 6], pts[4] - pts[pts.length - 5]) < 1) { pts.splice(0, 3); pts.length -= 3; sts.shift(); sts.pop(); }
     }
     // 長すぎる公道は途中まで（ゲームとして 6〜9km）
     var maxLen = o.maxLen || 8500, L = 0, cut = pts.length / 3;
@@ -141,8 +149,8 @@
         if (!M.ready) {   // 地図がまだ: 仮の道（メニューの見本用）
           b.straight(80); this.geom = null; return;
         }
-        var hp = hmPolyline(o), hw = o.hw || (o.hwy ? 5.4 : 4.2);
-        var line = M.lineOf(hp.p, hp.st, 0);
+        var hp = hmPolyline(o), hw = o.hw || (o.hwy ? 7.5 : 6.2);
+        var line = M.lineOf(hp.p, hp.st, 0, !!o.loop);
         var y0 = line.y[0];
         this.geom = { rw: Math.round(hw * M.UNITS * 2), cw: 0.9 / hw, lanes: o.hwy ? 2 : 2, hw: hw };
         M.pushSegs(b, line, y0);

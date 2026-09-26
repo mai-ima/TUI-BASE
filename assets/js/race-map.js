@@ -288,8 +288,85 @@
    * 区間の並びを作る。turn = 交差点での曲がり角（ラジアン、左が +）。
    * 最初の数 m は交差点の中を曲がる弧にして、実際の道の線へなめらかにつなぐ。
    */
-  function lineOf(p, st, turn) {
+  /**
+   * 点列をガウスでなめらかにする（OpenStreetMap の細かな折れ・小さな蛇行を消す）。
+   * sigma（m）。loop なら両端をつなげて、そうでなければ両端の位置は動かさない。
+   */
+  function smoothLine(r, sigma, loop) {
+    var n = r.n, sg = Math.max(1, sigma / r.step), R2 = Math.ceil(sg * 2.5);
+    var W = [], i, k;
+    for (k = -R2; k <= R2; k++) W.push(Math.exp(-(k * k) / (2 * sg * sg)));
+    function pass(A) {
+      var out = new Float64Array(A.length);
+      for (i = 0; i <= n; i++) {
+        var s0 = 0, ws = 0;
+        for (k = -R2; k <= R2; k++) {
+          var j = i + k;
+          if (loop) j = ((j % n) + n) % n;
+          else if (j < 0 || j > n) continue;
+          s0 += A[j] * W[k + R2]; ws += W[k + R2];
+        }
+        out[i] = s0 / ws;
+      }
+      if (loop) out[n] = out[0];
+      else {   // 端は元の位置へ（交差点の中心で道がつながるように）
+        var fade = Math.min(n / 2, Math.ceil(R2 * 1.5));
+        for (i = 0; i <= fade; i++) { var f = i / fade, s1 = f * f * (3 - 2 * f); out[i] = A[i] + (out[i] - A[i]) * s1; out[n - i] = A[n - i] + (out[n - i] - A[n - i]) * s1; }
+      }
+      return out;
+    }
+    r.x = pass(r.x); r.z = pass(r.z); r.y = pass(r.y);
+    return r;
+  }
+  M.smoothLine = smoothLine;
+
+  /**
+   * 急すぎる角（半径 rmin m 未満）だけを、そのまわりで重ねてなめらかにする。
+   * 市街地の直角の交差点で、道の内側の縁が折り返して重なるのを防ぐ。
+   */
+  function limitCurv(r, rmin, loop) {
+    var n = r.n, d = Math.max(1, Math.round(3 / r.step)), sp = Math.max(2, Math.round(10 / r.step));
+    var keep = loop ? 0 : Math.min(Math.floor(n / 2), Math.round(14 / r.step));
+    function P(A, j) { if (loop) j = ((j % n) + n) % n; else j = Math.max(0, Math.min(n, j)); return A[j]; }
+    for (var it = 0; it < 8; it++) {
+      var mark = new Uint8Array(n + 1), any = false, i, k;
+      for (i = keep; i <= n - keep; i++) {
+        var ax = r.x[i] - P(r.x, i - d), az = r.z[i] - P(r.z, i - d), bx = P(r.x, i + d) - r.x[i], bz = P(r.z, i + d) - r.z[i];
+        var la = Math.hypot(ax, az), lb = Math.hypot(bx, bz);
+        if (la < 1e-6 || lb < 1e-6) continue;
+        var ang = Math.abs(Math.atan2(ax * bz - az * bx, ax * bx + az * bz));
+        if (ang / ((la + lb) / 2) > 1 / rmin) {
+          // ヘアピン（向きが大きく変わる所）は、ならすと逆に縮むので触らない
+          var tx = r.x[i] - P(r.x, i - sp), tz = r.z[i] - P(r.z, i - sp), ux = P(r.x, i + sp) - r.x[i], uz = P(r.z, i + sp) - r.z[i];
+          if (Math.abs(Math.atan2(tx * uz - tz * ux, tx * ux + tz * uz)) > 2.0) continue;
+          any = true; for (k = -sp; k <= sp; k++) { var j = i + k; if (loop) j = ((j % n) + n) % n; if (j >= keep && j <= n - keep) mark[j] = 1; } }
+      }
+      if (!any) break;
+      ['x', 'z'].forEach(function (key) {
+        var A = r[key], out = Float64Array.from(A);
+        for (i = 0; i <= n; i++) {
+          if (!mark[i]) continue;
+          var s0 = 0, ws = 0;
+          for (k = -sp; k <= sp; k++) { var w = Math.exp(-(k * k) / (2 * (sp / 2) * (sp / 2))); s0 += P(A, i + k) * w; ws += w; }
+          out[i] = s0 / ws;
+        }
+        if (loop) out[n] = out[0];
+        r[key] = out;
+      });
+    }
+    return r;
+  }
+
+  // なめらかにした後、区間の長さをそろえ直す
+  function reflow(r) {
+    var p = new Float32Array((r.n + 1) * 3);
+    for (var i = 0; i <= r.n; i++) { p[i * 3] = r.x[i]; p[i * 3 + 1] = r.z[i]; p[i * 3 + 2] = r.y[i]; }
+    return resample(p, r.st);
+  }
+
+  function lineOf(p, st, turn, loop, rmin) {
     var r = resample(p, st);
+    if (r.n > 20) { smoothLine(r, 9, !!loop); limitCurv(r, rmin || 10, !!loop); r = reflow(r); }
     var n = r.n, H = new Float64Array(n + 1), w = 3;
     // 向き（前後 3 区間で平均して角ばりを消す）
     for (var i = 0; i <= n; i++) {
@@ -335,7 +412,7 @@
     for (var i = 0; i < n; i++) {
       var dh = r.h[i + 1] - r.h[i];
       var c = -dh * CURVE_K;
-      var cv = Math.max(-38, Math.min(38, c));
+      var cv = Math.max(-26, Math.min(26, c * 0.8));
       b.add(cv, (r.y[i + 1] - y0) * UNITS);
       var s = segs[segs.length - 1];
       s.phys = (c < 0 ? -1 : 1) * Math.min(16, 3.2 * Math.sqrt(Math.abs(c)));   // 曲率半径に合った限界速度（約 1G）
@@ -507,6 +584,7 @@
     var d = CLS[c] || CLS[4];
     var hw = d.hw;
     if (lanes) hw = hwy ? Math.max(3.6, lanes * 1.75 + 1.6) : Math.max(3.0, lanes * 1.65 + 0.4);
+    hw = Math.max(5.2, hw * 1.55);   // ゲームとして走りやすい幅に（実際の約 1.5 倍）
     return { hw: hw, lanes: hwy ? Math.max(2, lanes || d.lanes) : Math.max(2, lanes || d.lanes) };
   }
   M.geomFor = geomFor;
@@ -605,8 +683,8 @@
   /** 任意の折れ線（x,z,y の平坦配列）からコース（峠・サーキット・実在の道） */
   M.polySpec = function (p, opt) {
     opt = opt || {};
-    var r = lineOf(p, null, 0);
-    var hwv = opt.hw || 3.4, y0 = r.y[0];
+    var r = lineOf(p, null, 0, !!opt.loop);
+    var hwv = opt.hw || 5.2, y0 = r.y[0];
     return {
       r: r, hw: hwv,
       geom: { rw: Math.round(hwv * UNITS * 2), cw: 0.9 / hwv, lanes: opt.lanes || 2, hw: hwv },

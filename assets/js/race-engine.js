@@ -112,6 +112,42 @@
     return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')';
   }
 
+  /**
+   * コースの中心線（上から見た形, m）。3D 表示とミニマップで同じものを使う。
+   *   実在のコース: 地図の座標そのもの（wp）
+   *   それ以外: カーブを積み上げ、一周コースは一周で閉じるよう補正
+   * 向き h: 前 = (sin h, cos h)、右カーブで h が減る。
+   */
+  R.trackPath = function (segs, spec, mirror) {
+    var n = segs.length, M_SEG = 1.3, Y_SCALE = 0.35;
+    var hx = new Float64Array(n + 1), px = new Float64Array(n + 1), pz = new Float64Array(n + 1), py = new Float64Array(n + 1);
+    var loop = !(spec.touge || spec.p2p || spec.noFinish || spec.stopZone || spec.finishAt) || !!spec.loop;
+    if (segs[0] && segs[0].wp) {
+      for (var q = 0; q < n; q++) { var w = segs[q].wp; hx[q] = w.h; px[q] = w.x; pz[q] = w.z; py[q] = w.y; }
+      var wl = segs[n - 1].wp;
+      if (spec.loop) { hx[n] = hx[0] + Math.round((hx[n - 1] - hx[0]) / (2 * Math.PI)) * 2 * Math.PI; px[n] = px[0]; pz[n] = pz[0]; py[n] = py[0]; }
+      else { hx[n] = wl.h; px[n] = wl.x + Math.sin(wl.h) * M_SEG; pz[n] = wl.z + Math.cos(wl.h) * M_SEG; py[n] = wl.y; }
+      return { n: n, loop: !!spec.loop, h: hx, x: px, z: pz, y: py, real: true };
+    }
+    var total = 0, abs = 0;
+    segs.forEach(function (s) { total += s.curve; abs += Math.abs(s.curve); });
+    var turn = loop ? (3.2 * Math.PI) / (abs || 1) : 0.0055;
+    var bias = loop ? (2 * Math.PI * (total < 0 ? -1 : 1) * (mirror && total === 0 ? -1 : 1) - total * turn) / n : 0;
+    var h = 0, x = 0, z = 0;
+    for (var i = 0; i <= n; i++) {
+      hx[i] = h; px[i] = x; pz[i] = z;
+      var s = segs[i % n];
+      py[i] = (i < n ? s.p1.world.y : segs[n - 1].p2.world.y) / 200 * M_SEG * Y_SCALE;
+      if (i < n) { h -= s.curve * turn + bias; x += Math.sin(h) * M_SEG; z += Math.cos(h) * M_SEG; }
+    }
+    if (loop) {
+      var ex = px[n], ez = pz[n];
+      for (i = 0; i <= n; i++) { px[i] -= ex * i / n; pz[i] -= ez * i / n; }
+      py[n] = py[0];
+    }
+    return { n: n, loop: loop, h: hx, x: px, z: pz, y: py };
+  };
+
   function buildTrack(id, mirror, weather) {
     var spec = typeof id === 'string' ? R.TRACKS[id] : id;
     id = spec.id || (typeof id === 'string' ? id : 'custom');
@@ -123,7 +159,7 @@
     if (spec.custom && spec.after) spec.after(segs);
     var GR = R.Map && R.Map.GROUND;
     segs.forEach(function (s, i) {
-      if (mirror) { s.curve = -s.curve; if (s.phys !== undefined) s.phys = -s.phys; }
+      if (mirror) { s.curve = -s.curve; if (s.phys !== undefined) s.phys = -s.phys; if (s.wp) { s.wp = { x: -s.wp.x, z: s.wp.z, y: s.wp.y, h: -s.wp.h }; } }
       // 上り坂は明るく、下り坂は暗く
       var slope = (s.p2.world.y - s.p1.world.y) / SEG;
       var f = clamp(1 + slope * (spec.custom ? 2.2 : 0.9), 0.8, 1.16);
@@ -230,28 +266,17 @@
       var sc0 = 1 / Math.max(1, mxx - mnx, mxz - mnz), ox0 = (1 - (mxx - mnx) * sc0) / 2, oz0 = (1 - (mxz - mnz) * sc0) / 2;
       var map0 = segs.map(function (s) { return [(s.wp.x - mnx) * sc0 + ox0, (s.wp.z - mnz) * sc0 + oz0]; });
       if (!spec.custom) segs.forEach(function (s) { s.waterSide = spec.water || null; });
-      return { id: id, spec: spec, pal: pal, segs: segs, length: segs.length * SEG, map: map0 };
+      return { id: id, spec: spec, pal: pal, segs: segs, length: segs.length * SEG, map: map0, path: R.trackPath(segs, spec, mirror) };
     }
-    var heading = 0, x = 0, y = 0, pts = [];
-    var total = segs.reduce(function (a, s) { return a + s.curve; }, 0);
-    var absTotal = segs.reduce(function (a, s) { return a + Math.abs(s.curve); }, 0) || 1;
-    var turn = (3.2 * Math.PI) / absTotal;
-    var bias = (2 * Math.PI * (mirror ? -1 : 1) - total * turn) / segs.length;
-    segs.forEach(function (s) {
-      heading += s.curve * turn + bias;
-      x += Math.sin(heading); y -= Math.cos(heading);
-      pts.push([x, y]);
-    });
-    var ex = pts[pts.length - 1][0], ey = pts[pts.length - 1][1];
-    pts = pts.map(function (p, i2) { var f = (i2 + 1) / pts.length; return [p[0] - ex * f, p[1] - ey * f]; });
-    var minx = Infinity, maxx = -Infinity, miny = Infinity, maxy = -Infinity;
-    pts.forEach(function (p) { minx = Math.min(minx, p[0]); maxx = Math.max(maxx, p[0]); miny = Math.min(miny, p[1]); maxy = Math.max(maxy, p[1]); });
-    var sc = 1 / Math.max(maxx - minx, maxy - miny);
-    var ox = (1 - (maxx - minx) * sc) / 2, oy = (1 - (maxy - miny) * sc) / 2;
-    var map = pts.map(function (p) { return [(p[0] - minx) * sc + ox, (p[1] - miny) * sc + oy]; });
-
+    // コースの形（3D と同じ計算）。一周のコースは一周で元の場所に戻るよう、ずれを少しずつ配る
+    var path = R.trackPath(segs, spec, mirror);
+    var mnx2 = Infinity, mxx2 = -Infinity, mnz2 = Infinity, mxz2 = -Infinity;
+    for (var q = 0; q <= path.n; q++) { mnx2 = Math.min(mnx2, path.x[q]); mxx2 = Math.max(mxx2, path.x[q]); mnz2 = Math.min(mnz2, path.z[q]); mxz2 = Math.max(mxz2, path.z[q]); }
+    var sc2 = 1 / Math.max(1, mxx2 - mnx2, mxz2 - mnz2), ox2 = (1 - (mxx2 - mnx2) * sc2) / 2, oz2 = (1 - (mxz2 - mnz2) * sc2) / 2;
+    var map = [];
+    for (q = 0; q < path.n; q++) map.push([(path.x[q] - mnx2) * sc2 + ox2, (path.z[q] - mnz2) * sc2 + oz2]);
     segs.forEach(function (s) { s.waterSide = spec.water || null; });
-    return { id: id, spec: spec, pal: pal, segs: segs, length: segs.length * SEG, map: map };
+    return { id: id, spec: spec, pal: pal, segs: segs, length: segs.length * SEG, map: map, path: path };
   }
   R.buildTrack = buildTrack;
 
@@ -3141,7 +3166,7 @@
     /* 3D 描画が読むための情報（参照を渡すだけ。書き換えない） */
     sess.view = function () {
       return { P: P, pz: pz(), playerZ: PLAYER_Z, cars: racers(), traffic: traffic, cops: cops, keys: keys, t: t0, state: state,
-               car: car, spec: spec, pal: pal, weather: weather, night: night, geom: geom, trackLen: trackLen, segs: segs,
+               car: car, spec: spec, pal: pal, weather: weather, night: night, geom: geom, trackLen: trackLen, segs: segs, path: T.path,
                cross: spec.crossSeg ? sig.cross : [], crossSeg: spec.crossSeg, signal: sig.phase, dyn: dyn };
     };
     sess.keys = keys;
