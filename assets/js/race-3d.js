@@ -24,12 +24,14 @@
     document.head.appendChild(sc);
   }
   R.load3D = function (cb) {
-    if (window.THREE && TB.RaceTex) { cb(true); return; }
+    if (window.THREE && TB.RaceTex && TB.RaceLowPoly) { cb(true); return; }
     loadScript('assets/vendor/three.min.js', function (ok) {
       if (!ok || !window.THREE) { cb(false); return; }
       if (THREE.ColorManagement) THREE.ColorManagement.legacyMode = false;   // 色を sRGB として正しく扱う
       // 写真テクスチャ（Poly Haven, CC0）。読めなくても 3D は動く
-      loadScript('assets/vendor/race-tex.js', function () { cb(true); });
+      loadScript('assets/vendor/race-tex.js', function () {
+        loadScript('assets/vendor/kenney-cars.js', function () { cb(true); });   // ローポリ車両（Kenney, CC0）
+      });
     });
   };
   /** 写真テクスチャ（data URL なので file:// でも使える） */
@@ -529,6 +531,7 @@
     var T = THREE, key = body + color;
     var B = (R.BODIES && R.BODIES[body]) || { h: 0.56, body: 0.64 };
     if (carCache[key]) return carCache[key].clone();
+    if (B.lowpoly && R.lowPolyModel) { var lp = R.lowPolyModel(body, color); if (lp) { carCache[key] = lp; return lp.clone(); } }
     var g = new T.Group();
     var mdl = MODEL[body];
     if (!mdl || B.kart || B.open || B.buggy || B.tractor || B.monster) { g = oldCarModel(body, color); carCache[key] = g; return g.clone(); }

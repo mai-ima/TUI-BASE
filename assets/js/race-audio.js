@@ -34,7 +34,7 @@
     twin: { cyl: 2, idle: 800, red: 5000, wave: 'square', cut: 900, grit: 0.6, sub: 0.5, burble: 0.7, gear: G5, vol: 0.9 },
     ev: { ev: 1, gear: G1, vol: 0.7 }
   };
-  var BODY_PROFILE = {
+  var BODY_PROFILE = R.BODY_PROFILE = {
     kei: 'kei3', keitra: 'kei3', hatch: 'i4hi', sedan: 'i4', taxi: 'i4', minivan: 'i4', rally: 'i4t', evo: 'i4t', s13: 'i4t', ae86: 'i4hi',
     gc8: 'boxer', zn8: 'boxer', gt: 'i6', classic: 'i6', r32: 'i6t', fc: 'rotary', fd: 'rotary', suv: 'v6', pickup: 'v8', muscle: 'v8',
     police: 'v8', limo: 'v8', ambulance: 'v8', monster: 'v8', super: 'v8', rr: 'flat6', wedge: 'v12', proto: 'v12', formula: 'f1',
