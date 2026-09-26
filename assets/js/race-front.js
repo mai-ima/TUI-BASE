@@ -262,90 +262,59 @@
   function hash(str) { var h = 7; for (var i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) % 2147483647; return h || 1; }
   function srand(seed) { var s = seed; return function () { s = s * 16807 % 2147483647; return (s - 1) / 2147483646; }; }
 
-  function worldBuild(b, road, seed, turn) {
-    var r = srand(seed), kind = road.kind;
-    function sg() { return r() < 0.5 ? -1 : 1; }
-    function n(a, bb) { return Math.round(a + r() * (bb - a)); }
-    if (turn) b.road(4, 10, 6, turn * 9, 0);   // 交差点を曲がる
-    b.straight(20);
-    var guard = 0;
-    while (b.segs.length < road.len - 160 && guard++ < 200) {
-      var x = r();
-      switch (kind) {
-        case 'city': case 'ngcity': case 'suburb': case 'park':
-          if (x < 0.35) b.straight(n(10, 25));
-          else if (x < 0.8) b.curve(n(14, 24), sg() * (4 + r() * 3), 0);
-          else if (kind === 'ngcity' && x < 0.9) b.tunnel(function () { b.straight(30); });
-          else b.hill(15, sg() * 8);
-          break;
-        case 'dune': if (x < 0.5) b.straight(n(20, 45)); else b.curve(n(25, 40), sg() * (2 + r() * 2), sg() * 10); break;
-        case 'lake': case 'mikan': case 'coast': if (x < 0.3) b.straight(20); else b.curve(n(25, 45), sg() * (2 + r() * 3), kind === 'mikan' ? sg() * 8 : 0); break;
-        case 'plateau': if (x < 0.6) b.straight(n(30, 60)); else b.curve(n(25, 40), sg() * (1.5 + r() * 2), sg() * 4); break;
-        case 'river': if (x < 0.4) b.straight(n(20, 40)); else b.curve(n(25, 40), sg() * (2 + r() * 3), sg() * 6); break;
-        case 'bridge': if (x < 0.7) b.straight(n(30, 60)); else b.curve(n(40, 60), sg() * (1 + r()), sg() * 10); break;
-        case 'mount': if (x < 0.35) b.hill(25, sg() * (20 + r() * 20)); else if (x < 0.8) b.curve(n(20, 35), sg() * (4 + r() * 3), sg() * 15); else b.sCurves(4); break;
-        case 'hwy': if (x < 0.55) b.straight(n(40, 80)); else b.curve(n(50, 80), sg() * (1.2 + r() * 1.5), sg() * 8); break;
-        case 'hwymount':
-          if (x < 0.35) b.straight(40);
-          else if (x < 0.6) b.tunnel(function () { b.curve(40, sg() * 2, 0); b.straight(20); });
-          else b.curve(50, sg() * (1.5 + r() * 2), sg() * 20);
-          break;
-        default: if (x < 0.4) b.straight(20); else b.curve(n(20, 35), sg() * (3 + r() * 3), 0);
-      }
-    }
-    b.straight(55);
-  }
-
+  /*
+   * オープンワールド: 浜松市の実際の道路網（OpenStreetMap）を交差点から交差点へ走る。
+   * 交差点ではウインカー（Q / E）で曲がる方向を選ぶ。車線の数は実際の道のまま。
+   */
   function World(opts) {
-    var w = { job: opts.job || null, earned: 0, trips: 0, visited: [], clock: 0, order: null, flash: null, damage: 0 };
+    var M = R.Map;
+    var w = { job: opts.job || null, earned: 0, trips: 0, visited: [], clock: 0, order: null, flash: null, damage: 0, dist: 0 };
     var carId = w.job === 'taxi' ? 'taxi' : null;
-    var from = opts.start || 'hm_eki', to = null, road = null, exits = [];
+    var PL = R.worldPlaces();
+    var startId = PL[opts.start] ? opts.start : 'hm_eki';
+    var node = PL[startId].node;
+    var h = -1, exits = [], hist = [], turn = 0, line = null, curSpec = null, dest = opts.dest || null;
+    var placeAt = {};
+    Object.keys(PL).forEach(function (k) { placeAt[PL[k].node] = k; });
 
-    function exitsOf(node, came) {
-      var ex = R.neighbors(node).filter(function (e) { return e.to !== came; });
-      if (!ex.length) ex = R.neighbors(node);
-      var B = R.NODES[node], A = R.NODES[came] || { x: B.x - 0.05, y: B.y };
-      var vx = B.x - A.x, vy = B.y - A.y;
-      ex.forEach(function (e) { var E = R.NODES[e.to], ux = E.x - B.x, uy = E.y - B.y; e.ang = Math.atan2(vx * uy - vy * ux, vx * ux + vy * uy); });
-      ex.sort(function (a, b) { return a.ang - b.ang; });
-      return ex.slice(0, 3);
+    function dirArrow(d) { return { left: '←', right: '→', straight: '↑', uturn: '↶' }[d] || '↑'; }
+    function dirWord(d) { return { left: L('左折', 'left'), right: L('右折', 'right'), straight: L('直進', 'straight'), uturn: L('Uターン', 'U-turn') }[d] || ''; }
+    function exitLabel(ex) {
+      var to = M.to(ex.h), pk = placeAt[to];
+      var nm = pk ? t(R.NODES[pk].name) : M.roadName(ex.h);
+      return nm;
     }
-    function dirWords(n) { return n === 1 ? [L('まっすぐ', 'ahead')] : n === 2 ? [L('左', 'left'), L('右', 'right')] : [L('左', 'left'), L('まっすぐ', 'ahead'), L('右', 'right')]; }
-    function labels(ex) {
-      var nm = ex.map(function (e) { return t(R.NODES[e.to].name); });
-      if (nm.length === 1) return ['↑ ' + nm[0]];
-      if (nm.length === 2) return ['← ' + nm[0], nm[1] + ' →'];
-      return ['← ' + nm[0], '↑ ' + nm[1], nm[2] + ' →'];
-    }
-    var turn = 0;
+    function limitOf(e) { return e.ms || (e.c === 0 ? 100 : e.c === 5 ? 60 : e.c <= 2 ? 50 : 40); }
     function spec() {
-      var kind = R.ROAD_KINDS[road.kind], rev = road.a !== from, nd = R.NODES[to];
-      var water = kind.water && kind.water !== 'both' ? (rev ? (kind.water === 'left' ? 'right' : 'left') : kind.water) : kind.water || null;
-      var hw = !!kind.highway || (road.kind === 'bridge' && (road.limit || 0) >= 100);
-      var tn = turn;
-      return {
-        id: 'w-' + road.a + '-' + road.b + (rev ? '-r' : ''), name: road.name, pal: kind.pal, deco: kind.deco, weather: 'clear',
-        night: !!kind.night, skyline: !!kind.skyline, water: water, noFinish: true, rails: !!kind.rails,
-        banner: t(road.name) + '  →  ' + t(nd.name), fork: labels(exits),
-        startMark: R.NODES[from].mark, endMark: nd.mark,
-        twoWay: !hw, narrow: !hw, limit: road.limit || kind.limit, police: kind.police || 0, orbis: hw,
-        junction: nd.kind === 'signal' || nd.kind === 'town' ? { signal: nd.kind === 'signal' } : null,
-        train: road.line || null,
-        build: function (b) { worldBuild(b, road, hash(road.a + road.b + (rev ? 'r' : '')), tn); }
-      };
+      var e = M.edgeOf(h), toN = M.nodes[M.to(h)];
+      exits = M.exits(h);
+      var sig = toN.sig && exits.length > 1;
+      var jn = exits.length > 1 || toN.out.length > 1 ? { signal: sig, w: 10 + (e.c <= 2 ? 8 : 0) } : null;
+      var forks = exits.length > 1 ? exits.map(function (ex) { return dirArrow(ex.dir) + ' ' + exitLabel(ex); }) : null;
+      // 先の景色: ナビの道順 → なければ直進に近い道
+      var tail = -1, tn = targetNode();
+      if (tn >= 0 && tn !== M.to(h)) { var rt0 = M.route(M.to(h), tn); if (rt0 && rt0.hs.length) tail = rt0.hs[0]; }
+      if (tail < 0 && exits.length) tail = exits.reduce(function (a2, b2) { return Math.abs(b2.ang) < Math.abs(a2.ang) ? b2 : a2; }).h;
+      var sp = M.edgeSpec(h, { turn: turn, junction: jn, fork: forks, tail: tail });
+      sp.limit = limitOf(e);
+      line = null;
+      curSpec = sp;
+      return sp;
     }
+    function trafficFor(e) { return ({ 0: 9, 1: 8, 2: 7, 3: 5, 4: 3, 5: 2 })[e.c] || 2; }
     function cfgFor(start) {
-      exits = exitsOf(to, from);
-      var s = R.load();
+      var sp = spec(), e = M.edgeOf(h), s = R.load();
+      var dflt = 0, best = 9;
+      exits.forEach(function (ex, i) { if (Math.abs(ex.ang) < best) { best = Math.abs(ex.ang); dflt = i; } });
       return {
-        track: spec(), mode: 'world', laps: Infinity, weather: 'clear', field: [],
-        traffic: road.traffic !== undefined ? road.traffic : (R.ROAD_KINDS[road.kind].traffic || 2),
-        car: playerCar(s, carId), levelMul: 1, exits: exits.length, start: start,
-        hud: hud, onTick: tick, drawMap: drawMap,
+        track: sp, mode: 'world', laps: Infinity, weather: opts.weather || 'clear', field: [],
+        traffic: trafficFor(e), car: playerCar(s, carId), levelMul: 1,
+        exits: exits.length, exitDirs: exits.map(function (x) { return x.dir; }), exitDefault: dflt,
+        canBack: hist.length > 0, start: start,
+        hud: hud, onTick: tick, drawMap: drawMap, navInfo: navInfo,
         onViolation: violation, onBusted: busted, onEscape: escaped
       };
     }
-    function go(a, b, rd) { from = a; to = b; road = rd; }
 
     /* --- 違反・警察 --- */
     w.fines = 0; w.violations = 0;
@@ -364,25 +333,33 @@
     function busted() { fine(15000, L('🚨 確保された', '🚨 Busted')); }
     function escaped() { w.flash = { text: L('🚨 警察を振り切った！', '🚨 Lost the police!'), t: 4 }; }
 
+    /* --- 仕事 --- */
     function newOrder(at) {
-      var nodes = Object.keys(R.NODES).filter(function (n) { return n !== at; });
-      if (w.job === 'food') nodes = nodes.filter(function (n) { return R.route(at, n).path.length <= 3; });
-      var dest = pick(nodes), rt = R.route(at, dest);
-      var f = { taxi: 0.6, delivery: 0.52, food: 0.72 }[w.job];
-      var time = Math.round(rt.len * R.SEG / (R.MAX * f) + 12);
-      var fare = Math.round((({ taxi: 300, delivery: 250, food: 400 })[w.job] + rt.len * 0.5) / 10) * 10;
+      var lim = { taxi: [1200, 9000], delivery: [900, 7000], food: [500, 3500] }[w.job];
+      var keys = Object.keys(PL).filter(function (k) { return PL[k].node !== at; }), pick2 = null, rt = null;
+      for (var tries = 0; tries < 30 && !pick2; tries++) {
+        var k = pick(keys), r2 = M.route(at, PL[k].node);
+        if (r2 && r2.len >= lim[0] && r2.len <= lim[1]) { pick2 = k; rt = r2; }
+      }
+      if (!pick2) { pick2 = pick(keys); rt = M.route(at, PL[pick2].node) || { len: 3000, time: 300 }; }
+      var time = Math.round(rt.time * ({ taxi: 1.35, delivery: 1.45, food: 1.25 }[w.job]) + 20);
+      var fare = Math.round((({ taxi: 500, delivery: 300, food: 450 })[w.job] + rt.len * ({ taxi: 0.42, delivery: 0.25, food: 0.3 }[w.job])) / 10) * 10;
       var who = w.job === 'taxi' ? t(pick(R.PASSENGERS)) : w.job === 'food' ? L('うなぎ弁当', 'eel lunch box') : null;
       var parcel = w.job === 'delivery' ? pick(R.PARCELS) : null;
-      w.order = { dest: dest, time: time, left: time, fare: fare, who: who || t(parcel), fragile: parcel && parcel.fragile, dmg0: w.damage };
-      w.flash = { text: w.job === 'taxi' ? L('お客さん（' + w.order.who + '）「' + t(R.NODES[dest].name) + 'まで」', 'Fare (' + w.order.who + '): "' + t(R.NODES[dest].name) + ', please"')
-                                         : L(w.order.who + ' を ' + t(R.NODES[dest].name) + ' へ', 'Deliver ' + w.order.who + ' to ' + t(R.NODES[dest].name)), t: 5 };
+      w.order = { dest: pick2, node: PL[pick2].node, time: time, left: time, fare: fare, who: who || t(parcel), fragile: parcel && parcel.fragile, dmg0: w.damage, km: rt.len / 1000 };
+      w.flash = { text: w.job === 'taxi' ? L('お客さん（' + w.order.who + '）「' + t(R.NODES[pick2].name) + 'まで」', 'Fare (' + w.order.who + '): "' + t(R.NODES[pick2].name) + ', please"')
+                                         : L(w.order.who + ' を ' + t(R.NODES[pick2].name) + ' へ', 'Deliver ' + w.order.who + ' to ' + t(R.NODES[pick2].name)), t: 5 };
     }
-    function arrive(node) {
-      if (w.visited.indexOf(node) < 0) w.visited.push(node);
-      var first = R.edit(function (s) { if (s.visited[node]) return false; s.visited[node] = true; if (!w.job) s.money += 300; return true; });
-      if (first && !w.job) { w.earned += 300; w.flash = { text: L('初めて訪れた！ ' + t(R.NODES[node].name) + '  +300 円', 'First visit! ' + t(R.NODES[node].name) + ' +300'), t: 4 }; sfx('coin'); }
-      else if (!w.job) w.flash = { text: t(R.NODES[node].name), t: 3 };
-      if (w.order && node === w.order.dest) {
+    function arrive(nd) {
+      var k = placeAt[nd];
+      if (k && w.visited.indexOf(k) < 0) w.visited.push(k);
+      if (k) {
+        var first = R.edit(function (s) { s.visited = s.visited || {}; if (s.visited[k]) return false; s.visited[k] = true; if (!w.job) s.money += 300; return true; });
+        if (first && !w.job) { w.earned += 300; w.flash = { text: L('初めて訪れた！ ' + t(R.NODES[k].name) + '  +300 円', 'First visit! ' + t(R.NODES[k].name) + ' +300'), t: 4 }; sfx('coin'); }
+        else if (!w.job) w.flash = { text: '📍 ' + t(R.NODES[k].name), t: 3 };
+      }
+      if (dest && !w.job && PL[dest] && nd === PL[dest].node) { w.flash = { text: L('🏁 目的地に着きました：', '🏁 Arrived: ') + t(R.NODES[dest].name), t: 5 }; sfx('win'); dest = null; }
+      if (w.order && nd === w.order.node) {
         var o = w.order, late = o.left <= 0;
         var base = o.fare * (late ? 0.5 : 1), tip = late ? 0 : o.fare * 0.5 * (o.left / o.time);
         var pen = Math.max(0, w.damage - o.dmg0) * o.fare * (o.fragile ? 1.2 : 0.5) + (o.bad || 0) * o.fare * 0.25;
@@ -395,92 +372,147 @@
         w.flash = { text: (late ? L('遅刻… ', 'Late... ') : L('到着！ ', 'Arrived! ')) + '+' + yen(pay) + (tip > 0 ? L('（チップ込み）', ' (incl. tip)') : ''), t: 4 };
         sfx(late ? 'bad' : 'win');
         w.damage = 0;
-        newOrder(node);
-        return true;   // 修理して次へ
+        newOrder(nd);
+        return true;
       }
       return false;
     }
+    var lastT = 0;
     function tick(dt, info) {
       w.clock += dt; w.damage = info.damage;
+      w.dist += Math.abs(info.speed) * dt / R.SEG * 1.296;
       if (w.order) w.order.left -= dt;
       if (w.flash) { w.flash.t -= dt; if (w.flash.t <= 0) w.flash = null; }
+      lastT = info.frac || 0;
     }
-    function nav() {
-      if (!w.order) return null;
-      if (to === w.order.dest) return L('まもなく到着！', 'Arriving soon!');
-      var rt = R.route(to, w.order.dest), nx = rt.path[1];
-      var i = exits.findIndex(function (e) { return e.to === nx; });
-      if (i < 0) return L('次の分岐はどこでも（遠回り）', 'Any exit (detour)');
-      return L('次の分岐: ', 'Next fork: ') + dirWords(exits.length)[i] + '（' + t(R.NODES[nx].name) + '）';
+    function targetNode() { return w.order ? w.order.node : dest && PL[dest] ? PL[dest].node : -1; }
+    /** 次の交差点でどちらへ行けばよいか（ナビ） */
+    function navInfo() {
+      var tn = targetNode();
+      if (tn < 0 || exits.length === 0) return null;
+      var at = M.to(h);
+      if (at === tn) return { arrow: '🏁', text: L('この先の交差点が目的地', 'Destination at the next junction'), dir: 'goal' };
+      var rt = M.route(at, tn);
+      if (!rt || !rt.hs.length) return null;
+      var nx = rt.hs[0], i = exits.findIndex(function (ex) { return ex.h === nx; });
+      if (i < 0) return { arrow: '↺', text: L('次の交差点で進める方向へ（遠回り）', 'Take any exit (reroute)'), dir: 'any' };
+      var d = exits[i].dir;
+      return { arrow: dirArrow(d), text: L('次の交差点を ' + dirWord(d), 'Next junction: ' + dirWord(d)) + (exits.length > 1 && d !== 'straight' ? L('（' + (d === 'left' ? 'Q' : 'E') + ' でウインカー）', ' (blinker ' + (d === 'left' ? 'Q' : 'E') + ')') : ''), dir: d, km: rt.len / 1000 };
     }
     function hud() {
-      var lines = [];
+      var lines = [], e = M.edgeOf(h), toN = M.to(h);
+      var area = M.nearName(M.nodes[toN].x, M.nodes[toN].z, 700);
       if (w.job) {
         var o = w.order;
-        lines.push({ t: L('行き先: ', 'To: ') + t(R.NODES[o.dest].name) + '（' + o.who + '）' });
+        lines.push({ t: L('行き先: ', 'To: ') + t(R.NODES[o.dest].name) + '（' + o.who + '）' + ' ' + o.km.toFixed(1) + 'km' });
         lines.push({ t: (o.left > 0 ? L('残り ', 'Time ') + Math.ceil(o.left) + L(' 秒', 's') : L('遅刻中', 'LATE')) + L('　報酬 ', '  pay ') + yen(o.fare), c: o.left < 15 ? '#ff8a80' : '#e8e8f0' });
-        lines.push({ t: nav(), c: '#5ccfa0' });
       } else {
-        lines.push({ t: '→ ' + t(R.NODES[to].name) + '　' + ({ signal: L('（信号交差点）', '(signalised)'), ic: 'IC', jct: 'JCT', town: '' }[R.NODES[to].kind] || '') });
-        lines.push({ t: L('分岐: ', 'Fork: ') + labels(exits).join('  '), c: '#9fe8c8' });
+        lines.push({ t: M.roadName(h) + (area ? L('　・' + area + '付近', '  near ' + area) : '') });
+        if (dest && PL[dest]) lines.push({ t: L('目的地: ', 'Destination: ') + t(R.NODES[dest].name), c: '#9fe8c8' });
       }
+      if (exits.length > 1) lines.push({ t: L('交差点: ', 'Junction: ') + exits.map(function (ex) { return dirArrow(ex.dir) + ' ' + exitLabel(ex); }).join('　'), c: '#9fe8c8' });
       if (w.flash) lines.push({ t: w.flash.text, c: '#ffd93d' });
-      var title = w.job ? R.JOBS[w.job].icon + ' ' + t(R.JOBS[w.job].name) + L('　稼ぎ ', '  earned ') + yen(w.earned) : '🗺 ' + t(road.name);
+      var title = w.job ? R.JOBS[w.job].icon + ' ' + t(R.JOBS[w.job].name) + L('　稼ぎ ', '  earned ') + yen(w.earned) : '🗺 ' + L('浜松市', 'Hamamatsu') + L('　走行 ', '  driven ') + (w.dist / 1000).toFixed(1) + 'km';
       return { title: title, lines: lines };
     }
+    /** ミニマップ（北が上。実際の道の形） */
     function drawMap(g, x, y, size, frac) {
-      function P(n) { var N = R.NODES[n]; return [x + 6 + N.x * (size - 12), y + 6 + N.y * (size - 12)]; }
-      R.ROADS.forEach(function (r) {
-        var a = P(r.a), b = P(r.b), cur = r === road;
-        g.strokeStyle = cur ? '#ffd93d' : (r.kind === 'hwy' || r.kind === 'hwymount') ? 'rgba(77,208,225,.8)' : 'rgba(255,255,255,.45)';
-        g.lineWidth = cur ? 2.5 : (r.kind === 'hwy' || r.kind === 'hwymount') ? 2 : 1;
-        g.beginPath(); g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); g.stroke();
+      var p = M.pts(h), n = p.length / 3, e = M.edgeOf(h), L0 = e.len * frac, d = 0, k = 0;
+      while (k < n - 2) { var dd = Math.hypot(p[k * 3 + 3] - p[k * 3], p[k * 3 + 4] - p[k * 3 + 1]); if (d + dd >= L0) break; d += dd; k++; }
+      var f = Math.min(1, (L0 - d) / Math.max(1, Math.hypot(p[k * 3 + 3] - p[k * 3], p[k * 3 + 4] - p[k * 3 + 1])));
+      var cx = p[k * 3] + (p[k * 3 + 3] - p[k * 3]) * f, cz = p[k * 3 + 1] + (p[k * 3 + 4] - p[k * 3 + 1]) * f;
+      var hd = Math.atan2(p[k * 3 + 3] - p[k * 3], p[k * 3 + 4] - p[k * 3 + 1]);
+      var span = 900, sc = size / span, ox = x + size / 2, oy = y + size / 2;
+      g.save(); g.beginPath(); g.rect(x + 2, y + 2, size - 4, size - 4); g.clip();
+      g.fillStyle = 'rgba(20,28,24,.55)'; g.fillRect(x, y, size, size);
+      function P2(px, pz) { return [ox + (px - cx) * sc, oy + (pz - cz) * sc]; }
+      var gx = Math.floor(cx / 200), gz = Math.floor(cz / 200), seen = {};
+      for (var a = -3; a <= 3; a++) for (var b = -3; b <= 3; b++) (M.egrid[(gx + a) + ',' + (gz + b)] || []).forEach(function (id) {
+        if (seen[id]) return; seen[id] = 1;
+        var E = M.edges[id], q = E.pts;
+        g.strokeStyle = E.c === 0 || E.c === 5 ? '#4dd0e1' : E.c <= 2 ? '#ffcc80' : 'rgba(230,235,240,.75)';
+        g.lineWidth = E.c <= 2 || E.c === 5 ? 2.2 : 1.3;
+        g.beginPath();
+        for (var i = 0; i < q.length / 3; i++) { var s2 = P2(q[i * 3], q[i * 3 + 1]); if (i) g.lineTo(s2[0], s2[1]); else g.moveTo(s2[0], s2[1]); }
+        g.stroke();
       });
-      g.lineWidth = 1;
-      Object.keys(R.NODES).forEach(function (n) {
-        var p = P(n), dest = w.order && w.order.dest === n;
-        g.fillStyle = dest ? (Math.floor(w.clock * 3) % 2 ? '#ff5252' : '#ffd93d') : '#cfd8dc';
-        g.beginPath(); g.arc(p[0], p[1], dest ? 3.5 : 2, 0, Math.PI * 2); g.fill();
-      });
-      var a = P(from), b = P(to);
-      g.fillStyle = '#5ccfa0'; g.beginPath(); g.arc(a[0] + (b[0] - a[0]) * frac, a[1] + (b[1] - a[1]) * frac, 3.5, 0, Math.PI * 2); g.fill();
+      // 道順
+      var tn = targetNode();
+      if (tn >= 0) {
+        var rt = M.route(M.to(h), tn);
+        if (rt) {
+          g.strokeStyle = 'rgba(92,207,160,.95)'; g.lineWidth = 3; g.beginPath();
+          var s0 = P2(cx, cz); g.moveTo(s0[0], s0[1]);
+          for (var j = k + 1; j < n; j++) { var s3 = P2(p[j * 3], p[j * 3 + 1]); g.lineTo(s3[0], s3[1]); }
+          rt.hs.slice(0, 12).forEach(function (hh) { var q2 = M.pts(hh); for (var i2 = 1; i2 < q2.length / 3; i2++) { var s4 = P2(q2[i2 * 3], q2[i2 * 3 + 1]); g.lineTo(s4[0], s4[1]); } });
+          g.stroke();
+          var T2 = M.nodes[tn], tp = P2(T2.x, T2.z);
+          g.fillStyle = Math.floor(w.clock * 3) % 2 ? '#ff5252' : '#ffd93d';
+          g.beginPath(); g.arc(clamp(tp[0], x + 6, x + size - 6), clamp(tp[1], y + 6, y + size - 6), 4, 0, Math.PI * 2); g.fill();
+        }
+      }
+      // 自車（向きの矢印）
+      g.translate(ox, oy); g.rotate(-hd + Math.PI);
+      g.fillStyle = '#5ccfa0'; g.strokeStyle = '#0b1a12'; g.lineWidth = 1;
+      g.beginPath(); g.moveTo(0, -7); g.lineTo(5, 5); g.lineTo(0, 2); g.lineTo(-5, 5); g.closePath(); g.fill(); g.stroke();
+      g.restore();
+      g.fillStyle = '#fff'; g.font = 'bold 10px sans-serif'; g.textAlign = 'center'; g.fillText('N', x + size - 10, y + 14);
+      g.strokeStyle = '#fff'; g.beginPath(); g.moveTo(x + size - 10, y + 17); g.lineTo(x + size - 10, y + 24); g.stroke();
     }
 
+    function go(newH, tn) { if (h >= 0) { hist.push(h); if (hist.length > 30) hist.shift(); } h = newH; turn = tn || 0; }
     w.first = function () {
-      var nb = R.neighbors(from);
-      if (w.job) newOrder(from);
-      var pickE = nb[0];
-      if (w.order) { var rt = R.route(from, w.order.dest); pickE = nb.filter(function (e) { return e.to === rt.path[1]; })[0] || nb[0]; }
-      if (w.visited.indexOf(from) < 0) w.visited.push(from);
-      go(from, pickE.to, pickE.road);
+      if (w.job) newOrder(node);
+      var outs = M.nodes[node].out.slice(), tn = targetNode(), pickH = -1;
+      if (tn >= 0 && tn !== node) { var rt = M.route(node, tn); if (rt && rt.hs.length) pickH = rt.hs[0]; }
+      if (pickH < 0) outs.forEach(function (o) { var E = M.edgeOf(o); if (pickH < 0 || E.c < M.edgeOf(pickH).c || (E.c === M.edgeOf(pickH).c && E.len > M.edgeOf(pickH).len)) pickH = o; });
+      if (pickH < 0) pickH = M.edges[0].id * 2;
+      arrive(node);
+      go(pickH, 0);
       return cfgFor(null);
     };
     w.next = function (carry) {
-      if (carry.reverse) {
-        turn = 0;
-        go(to, from, road);
+      if (carry.back) {   // バックで前の道へ戻る
+        var pv = hist.pop();
+        if (pv === undefined) return null;
+        h = pv; turn = 0;
+        return cfgFor({ speed: carry.speed, x: carry.x, nitro: carry.nitro, damage: carry.damage, fromEnd: 8, rev: true });
+      }
+      if (carry.reverse) {   // その場で U ターン
+        var rv = M.rev(h);
+        if (rv < 0) { w.flash = { text: L('一方通行のため U ターンできません', 'One-way: no U-turn'), t: 3 }; return null; }
+        go(rv, 0);
         return cfgFor({ speed: 0, x: carry.x, nitro: carry.nitro, damage: carry.damage, frac: 1 - carry.frac });
       }
-      var fixed = arrive(to);
+      var fixed = arrive(M.to(h));
       var ci = Math.min(carry.choice || 0, exits.length - 1), ex = exits[ci] || exits[0];
-      turn = exits.length === 1 ? 0 : exits.length === 2 ? (ci === 0 ? -1 : 1) : ci - 1;
-      go(to, ex.to, ex.road);
-      var cfg2 = cfgFor({ speed: carry.speed, x: carry.x, nitro: carry.nitro, damage: fixed ? 0 : carry.damage, total: 0, copGap: carry.copGap });
-      turn = 0;
-      return cfg2;
+      go(ex.h, ex.ang);
+      return cfgFor({ speed: carry.speed, x: carry.x, nitro: carry.nitro, damage: fixed ? 0 : carry.damage, total: 0, copGap: carry.copGap });
     };
     w.summary = function () {
       var out = [];
       if (w.job) out.push(L('完了 ', 'Jobs done ') + w.trips + L(' 件　稼ぎ ', '  earned ') + yen(w.earned));
-      else out.push(L('訪れた場所 ', 'Places visited ') + w.visited.map(function (n) { return t(R.NODES[n].name); }).join('・'));
+      else out.push(L('訪れた場所 ', 'Places visited ') + (w.visited.map(function (n) { return t(R.NODES[n].name); }).join('・') || '—'));
       if (!w.job && w.earned) out.push(L('初訪問ボーナス +', 'First-visit bonus +') + yen(w.earned));
       if (w.violations) out.push(L('違反 ', 'Violations ') + w.violations + L(' 回　反則金 ', '  fines ') + yen(w.fines));
-      out.push(L('走行時間 ', 'Drive time ') + fmt(w.clock * 1000));
+      out.push(L('走行距離 ', 'Distance ') + (w.dist / 1000).toFixed(1) + ' km　' + L('走行時間 ', 'Drive time ') + fmt(w.clock * 1000));
       return out;
     };
-    w.here = function () { return { from: from, to: to }; };
+    w.here = function () { return { h: h, node: M.to(h) }; };
     return w;
   }
+
+  /** 実在の地図に載っている場所（R.NODES の名前 + 地図の交差点） */
+  R.worldPlaces = function () {
+    var M = R.Map, out = {};
+    if (!M.ready) return out;
+    Object.keys(M.places).forEach(function (k) {
+      if (!R.NODES[k]) return;
+      var p = M.places[k];
+      out[k] = { x: p[0], z: p[1], node: p[2] };
+    });
+    return out;
+  };
 
   /* =====================================================================
      GUI 版（1 つのウィンドウの中で遊ぶ）
@@ -919,69 +951,78 @@
 
     /* ---------- オープンワールド・アルバイト ---------- */
     SCREENS.world = function (job) {
-      var start = 'hm_eki';
+      var start = 'hm_eki', dest = null, pickMode = 'start';
+      var view = { cx: -2500, cz: -2500, scale: 0.034 };
       return { build: function (o) {
-        var p = panel(job ? R.JOBS[job].icon + ' ' + t(R.JOBS[job].name) : L('オープンワールド', 'Open World'),
-                      job ? t(R.JOBS[job].desc) : L('浜松市〜東名・新東名〜名古屋市を自由に走る', 'Roam from Hamamatsu via the expressways to Nagoya'));
-        var row = el('div', 'rx-row');
-        var mc = el('canvas', 'rx-map'); mc.width = 900; mc.height = 560;
-        function drawBig() {
-          var g2 = mc.getContext('2d'), Wm = mc.width, Hm = mc.height;
-          function P(n) { var N = R.NODES[n]; return [30 + N.x * (Wm - 60), 26 + N.y * (Hm - 52)]; }
-          g2.fillStyle = '#1b2a1f'; g2.fillRect(0, 0, Wm, Hm);
-          // 山地（北）・台地・海・浜名湖
-          var gr = g2.createLinearGradient(0, 0, 0, Hm); gr.addColorStop(0, '#2e3b2a'); gr.addColorStop(0.55, '#243427'); gr.addColorStop(1, '#1d2b22');
-          g2.fillStyle = gr; g2.fillRect(0, 0, Wm, Hm);
-          g2.fillStyle = '#1f4f7a'; g2.fillRect(0, Hm * 0.965, Wm, Hm * 0.035);
-          var a1 = P('hm_kanzanji'), a2 = P('hm_benten'), a3 = P('hm_kiga');
-          g2.fillStyle = '#23608f'; g2.beginPath(); g2.ellipse((a1[0] + a2[0]) / 2 - 6, (a3[1] + a2[1]) / 2, 20, (a2[1] - a3[1]) / 2 + 4, 0, 0, Math.PI * 2); g2.fill();
-          var p1 = P('hm_kasai'), p2 = P('hm_futamata');
-          g2.strokeStyle = '#2f79b3'; g2.lineWidth = 3; g2.beginPath(); g2.moveTo(p2[0] + 8, 0); g2.lineTo(p2[0] + 4, p2[1]); g2.lineTo(p1[0] + 10, p1[1]); g2.lineTo(p1[0] + 16, Hm); g2.stroke();
-          var ng = P('ng_port'); g2.fillStyle = '#1f4f7a'; g2.fillRect(ng[0] - 40, ng[1] + 6, 120, Hm);
-          g2.font = 'bold 15px sans-serif'; g2.fillStyle = 'rgba(255,255,255,.28)';
-          g2.fillText(L('浜松市', 'Hamamatsu'), P('hm_eki')[0] - 20, P('hm_eki')[1] + 42);
-          g2.fillText(L('名古屋市', 'Nagoya'), P('ng_meieki')[0] - 30, P('ng_castle')[1] - 22);
-          g2.fillText(L('浜名湖', 'Lake Hamana'), a1[0] - 70, a1[1] + 18);
-          g2.fillText(L('天竜川', 'Tenryu R.'), p2[0] + 12, p2[1] - 40);
-          g2.fillText(L('遠州灘', 'Enshu-nada'), P('hm_dune')[0] - 20, Hm - 6);
-          R.ROADS.forEach(function (r) {
-            var a = P(r.a), b = P(r.b), hw = r.kind === 'hwy' || r.kind === 'hwymount';
-            g2.strokeStyle = hw ? '#4dd0e1' : r.kind === 'mount' ? '#a1887f' : '#cfd8dc'; g2.lineWidth = hw ? 3.5 : 1.8;
-            g2.beginPath(); g2.moveTo(a[0], a[1]); g2.lineTo(b[0], b[1]); g2.stroke();
-            if (r.line) { g2.setLineDash([4, 4]); g2.strokeStyle = r.line === 'entetsu' ? '#ef5350' : '#fff'; g2.lineWidth = 1; g2.beginPath(); g2.moveTo(a[0] + 4, a[1]); g2.lineTo(b[0] + 4, b[1]); g2.stroke(); g2.setLineDash([]); }
-          });
-          Object.keys(R.NODES).forEach(function (n) {
-            var p3 = P(n), on = n === start, N = R.NODES[n];
-            g2.fillStyle = on ? '#5ccfa0' : N.kind === 'ic' || N.kind === 'jct' ? '#4dd0e1' : '#eceff1';
-            g2.beginPath(); g2.arc(p3[0], p3[1], on ? 7 : 4, 0, Math.PI * 2); g2.fill();
-            g2.font = (on ? 'bold 13px' : '11px') + ' sans-serif';
-            var nm = t(N.name), tw = g2.measureText(nm).width;
-            g2.fillStyle = 'rgba(0,0,0,.55)'; g2.fillRect(p3[0] + 6, p3[1] - 7, tw + 4, 14);
-            g2.fillStyle = on ? '#5ccfa0' : '#e0e6ec'; g2.fillText(nm, p3[0] + 8, p3[1] + 4);
-          });
-          g2.font = '11px sans-serif'; g2.fillStyle = '#4dd0e1'; g2.fillText(L('━ 高速道路', '━ Expressway'), 12, Hm - 26);
-          g2.fillStyle = '#ef5350'; g2.fillText(L('┅ 遠州鉄道', '┅ Enshu Railway'), 110, Hm - 26);
-          g2.fillStyle = '#ddd'; g2.fillText(L('┅ 天竜浜名湖鉄道', '┅ Tenhama Line'), 220, Hm - 26);
-        }
-        drawBig();
-        mc.addEventListener('click', function (e) {
-          var r = mc.getBoundingClientRect(), mx = (e.clientX - r.left) / r.width * mc.width, my = (e.clientY - r.top) / r.height * mc.height;
-          Object.keys(R.NODES).forEach(function (n) { var N = R.NODES[n], px = 30 + N.x * (mc.width - 60), py = 26 + N.y * (mc.height - 52); if (Math.hypot(px - mx, py - my) < 12) { start = n; drawBig(); } });
-        });
-        row.appendChild(mc);
-        var info = el('div', 'rx-info');
-        info.appendChild(el('div', 'rx-s', L('道の終わりの分岐では、走っている車線（左・中央・右）で行き先を選びます。標識を見て寄せておきましょう。止まって r で U ターン。',
-                                               'At the end of each road, the lane you are in (left/centre/right) picks the exit. Stop and press r to U-turn.')));
-        if (job === 'taxi') info.appendChild(el('div', 'rx-s', L('タクシーの車で走ります。', 'You drive the company taxi.')));
-        info.appendChild(optRow(L('出発地', 'Start'), function () { return t(R.NODES[start].name); }, function (d) {
-          var ks = Object.keys(R.NODES); start = ks[(ks.indexOf(start) + d + ks.length) % ks.length]; drawBig();
-        }));
-        info.appendChild(item(L('出発する', 'Go'), '', function () { runWorld(job, start); }, { icon: '🚗', cls: 'accent' }));
-        info.appendChild(item(L('戻る', 'Back'), '', function () { back(); }, { icon: '↩' }));
-        row.appendChild(info);
-        p.appendChild(row);
-        p.appendChild(hint());
+        var p = panel(job ? R.JOBS[job].icon + ' ' + t(R.JOBS[job].name) : L('オープンワールド（浜松市・実在の道路）', 'Open World — real Hamamatsu roads'),
+                      job ? t(R.JOBS[job].desc) : L('浜松市全域の実在の道路・交差点・信号を走る（OpenStreetMap・国土地理院のデータ）', 'Drive every real road, junction and signal of Hamamatsu (OpenStreetMap / GSI data)'));
         o.appendChild(p);
+        var wait = el('div', 'rx-s', L('地図を読み込み中…', 'Loading the map...'));
+        p.appendChild(wait);
+        R.Map.load(function (ok) {
+          wait.remove();
+          if (!ok) { p.appendChild(el('div', 'rx-s', L('地図データを読み込めませんでした。', 'Could not load the map data.'))); p.appendChild(list([item(L('戻る', 'Back'), '', back, { icon: '↩' })])); return; }
+          var PL = R.worldPlaces();
+          var row = el('div', 'rx-row');
+          var mc = el('canvas', 'rx-map'); mc.width = 900; mc.height = 560;
+          var conv = null;
+          function label(k) { return t(R.NODES[k].name); }
+          function drawBig() {
+            var rt = null;
+            if (dest && PL[dest] && PL[start]) { var r2 = R.Map.route(PL[start].node, PL[dest].node); rt = r2 ? r2.hs : null; }
+            conv = R.Map.drawMap(mc, view, { places: PL, sel: start, dest: dest, route: rt, label: label });
+          }
+          drawBig();
+          var drag = null;
+          mc.addEventListener('mousedown', function (e) { drag = { x: e.clientX, y: e.clientY, cx: view.cx, cz: view.cz, moved: false }; });
+          window.addEventListener('mouseup', function () { setTimeout(function () { drag = null; }, 0); });
+          mc.addEventListener('mousemove', function (e) {
+            if (!drag) return;
+            var r = mc.getBoundingClientRect(), k = mc.width / r.width;
+            var dx = (e.clientX - drag.x) * k, dy = (e.clientY - drag.y) * k;
+            if (Math.abs(dx) + Math.abs(dy) > 4) drag.moved = true;
+            view.cx = drag.cx - dx / view.scale; view.cz = drag.cz - dy / view.scale; drawBig();
+          });
+          mc.addEventListener('wheel', function (e) { e.preventDefault(); view.scale = clamp(view.scale * (e.deltaY < 0 ? 1.25 : 0.8), 0.006, 0.6); drawBig(); }, { passive: false });
+          mc.addEventListener('click', function (e) {
+            if (drag && drag.moved) return;
+            var r = mc.getBoundingClientRect(), mx = (e.clientX - r.left) / r.width * mc.width, my = (e.clientY - r.top) / r.height * mc.height;
+            var best = null, bd = 16;
+            Object.keys(PL).forEach(function (k) { var q = conv.toScreen(PL[k].x, PL[k].z), d = Math.hypot(q[0] - mx, q[1] - my); if (d < bd) { bd = d; best = k; } });
+            if (!best) return;
+            if (pickMode === 'dest' && !job) dest = best === start ? null : best; else start = best;
+            sfx('click'); drawBig(); refresh();
+          });
+          row.appendChild(mc);
+          var info = el('div', 'rx-info');
+          info.appendChild(el('div', 'rx-s', L('交差点で曲がるときは Q（左）／ E（右）でウインカーを出します。出していなければ直進。ナビの矢印（← → ↑）に従うと目的地へ。↓を押し続けると停止後バック、R で U ターン。地図はドラッグで移動・ホイールで拡大。',
+                                                 'At junctions signal with Q (left) / E (right); no signal = straight. Follow the nav arrows. Hold ↓ after stopping to reverse, R to U-turn. Drag / wheel the map.')));
+          if (job === 'taxi') info.appendChild(el('div', 'rx-s', L('タクシーの車で走ります。', 'You drive the company taxi.')));
+          var keys = Object.keys(PL);
+          var rows = [];
+          function refresh() { rows.forEach(function (f) { f(); }); }
+          var r1 = optRow(L('出発地', 'Start'), function () { return label(start); }, function (d) { start = keys[(keys.indexOf(start) + d + keys.length) % keys.length]; view.cx = PL[start].x; view.cz = PL[start].z; drawBig(); });
+          info.appendChild(r1);
+          if (!job) {
+            info.appendChild(optRow(L('目的地', 'Destination'), function () { return dest ? label(dest) : L('なし（自由に走る）', 'none (free roam)'); }, function (d) {
+              var ks = [null].concat(keys.filter(function (k) { return k !== start; }));
+              dest = ks[(ks.indexOf(dest) + d + ks.length) % ks.length]; drawBig();
+            }));
+            info.appendChild(optRow(L('地図のクリック', 'Map click sets'), function () { return pickMode === 'start' ? L('出発地', 'start') : L('目的地', 'destination'); }, function () { pickMode = pickMode === 'start' ? 'dest' : 'start'; }));
+          }
+          info.appendChild(optRow(L('地図の範囲', 'Map zoom'), function () { return view.scale < 0.012 ? L('全域', 'whole city') : view.scale < 0.05 ? L('市街地', 'urban') : L('中心部', 'centre'); }, function (d) {
+            var zs = [0.009, 0.034, 0.12], i = zs.findIndex(function (z) { return z >= view.scale - 1e-4; });
+            view.scale = zs[clamp((i < 0 ? 2 : i) + d, 0, 2)];
+            if (view.scale === 0.009) { view.cx = 3000; view.cz = -27000; } else if (PL[start]) { view.cx = PL[start].x; view.cz = PL[start].z; }
+            drawBig();
+          }));
+          info.appendChild(item(L('出発する', 'Go'), '', function () { runWorld(job, start, dest); }, { icon: '🚗', cls: 'accent' }));
+          info.appendChild(item(L('戻る', 'Back'), '', function () { back(); }, { icon: '↩' }));
+          row.appendChild(info);
+          p.appendChild(row);
+          p.appendChild(hint());
+          app.sel = 0; highlight();
+        });
       } };
     };
 
@@ -998,10 +1039,13 @@
       } };
     };
 
-    function runWorld(job, start) {
-      var w = World({ job: job, start: start });
-      app.cmd = job ? 'job ' + job + ' ' + start : 'world ' + start;
-      run({ make: function () { return w.first(); }, chain: w.next, world: w });
+    function runWorld(job, start, dest) {
+      R.Map.load(function (ok) {
+        if (!ok) return;
+        var w = World({ job: job, start: start, dest: dest });
+        app.cmd = job ? 'job ' + job + ' ' + start : 'world ' + start;
+        run({ make: function () { return w.first(); }, chain: w.next, world: w });
+      });
     }
 
     /* ---------- グランプリ ---------- */
@@ -1768,12 +1812,18 @@
   }
 
   function tuiWorld(job, start) {
-    if (start && !R.NODES[start]) start = null;
-    var w = World({ job: job, start: start || 'hm_eki' });
-    out([[{ t: L('分岐では車線（左・中央・右）で行き先を選びます。止まって r で U ターン。q で終了。', 'Lanes pick the exit at forks. Stop and press r to U-turn. q to finish.'), c: 'dim' }]]);
-    tuiRun(w.first(), { title: job ? t(R.JOBS[job].name) : L('オープンワールド', 'Open world'), chain: w.next, world: w, cmd: job ? 'job ' + job : 'world' }, null);
+    out([[{ t: L('浜松市の地図を読み込み中…', 'Loading the Hamamatsu map...'), c: 'dim' }]]);
+    R.Map.load(function (ok) {
+      if (!ok) { out([[{ t: L('地図データを読み込めませんでした。', 'Could not load the map.'), c: 'err' }]]); return; }
+      var PL = R.worldPlaces();
+      if (start && !PL[start]) start = null;
+      var w = World({ job: job, start: start || 'hm_eki' });
+      out([[{ t: L('交差点では z（左）/ c（右）でウインカー。出さなければ直進。止まって↓長押しでバック、r で U ターン。q で終了。', 'At junctions signal with z (left) / c (right); none = straight. Hold down to reverse, r to U-turn, q to quit.'), c: 'dim' }]]);
+      tuiRun(w.first(), { title: job ? t(R.JOBS[job].name) : L('オープンワールド（浜松市）', 'Open world (Hamamatsu)'), chain: w.next, world: w, cmd: job ? 'job ' + job : 'world' }, null);
+    });
     return [];
   }
+
 
   function tuiSingle(cfg, ctx, cmd, title) {
     tuiRun(cfg, { title: title, cmd: cmd, onResult: function (r) { return applyResult(ctx, r); } }, function (r) {

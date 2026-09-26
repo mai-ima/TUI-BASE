@@ -36,6 +36,7 @@
   var OVERLAP = CAR_W * 2 * 0.9;
   var TUNNEL_H = 2600;
   var MPS = 280 / 3.6 / 60;
+  var UNITS_M = SEG / 1.296;  // 1 m（エンジンの単位）
   var BRAKE = MAX * 0.6, COAST = MAX / 8;   // ブレーキ・エンジンブレーキの減速  // 1 区間は約 1.3 m（最高速 280km/h で 1 秒 60 区間）
   var W = 640, H = 360;      // 今描いている画面の大きさ（描く前に設定する）
 
@@ -64,6 +65,7 @@
     }
     var b = {
       segs: segs,
+      add: add,
       road: road,
       straight: function (n) { road(n, n, n, 0, 0); },
       curve: function (n, c, h) { road(n, n, n, c, h || 0); },
@@ -118,21 +120,30 @@
     var segs = b.segs, pal = spec.pal, wet = weather === 'rain' || weather === 'snow';
     var rand = seeded(id.length * 7919 + id.charCodeAt(0) * 131 + id.charCodeAt(1));
 
+    if (spec.custom && spec.after) spec.after(segs);
+    var GR = R.Map && R.Map.GROUND;
     segs.forEach(function (s, i) {
-      if (mirror) s.curve = -s.curve;
+      if (mirror) { s.curve = -s.curve; if (s.phys !== undefined) s.phys = -s.phys; }
       // 上り坂は明るく、下り坂は暗く
       var slope = (s.p2.world.y - s.p1.world.y) / SEG;
-      var f = clamp(1 + slope * 0.9, 0.8, 1.16);
+      var f = clamp(1 + slope * (spec.custom ? 2.2 : 0.9), 0.8, 1.16);
       var alt = Math.floor(i / RUMBLE) % 2;
       s.alt = alt;
       s.cGrass = s.tunnel ? shade(pal.wall || '#333', alt ? 0.9 : 0.8) : shade(pal.grass[alt], f);
       s.cRoad = shade(pal.road[alt], f * (s.tunnel ? 0.8 : 1) * (wet ? 0.84 : 1));
       s.cRumble = spec.curbs ? shade(pal.rumble[alt], f) : shade(pal.road[0], f * (alt ? 1.18 : 1.14));
-      s.rails = !!spec.rails;
+      if (!spec.custom) s.rails = !!spec.rails;
+      else if (!s.tunnel) {
+        // 実在の道: 両側の地面の色・歩道
+        var fa = f * (Math.floor(i / 6) % 2 ? 1 : 0.965);
+        if (GR && s.luL !== undefined) { s.cGrassL = shade(GR[s.luL] || pal.grass[0], fa); s.cGrassR = shade(GR[s.luR] || pal.grass[0], fa); }
+        if (s.urban && !spec.hwy) { s.cRumble = shade(alt ? '#b9b6ae' : '#b1aea6', f); s.rumW = 2.6 / (spec.geom.hw || 4); s.curb = true; }
+        else { s.cRumble = shade(alt ? '#8f9086' : '#88897f', f); s.rumW = 1.0 / (spec.geom.hw || 4); }
+      }
     });
 
     // 路肩の飾り。カーブの外側には矢印看板
-    for (var i = 20; i < segs.length - 5; i++) {
+    for (var i = 20; i < (spec.custom ? 0 : segs.length - 5); i++) {
       var seg = segs[i];
       if (seg.tunnel) { if (i % 6 === 0) seg.sprites.push({ kind: 'tlight', offset: 0 }); continue; }
       if (Math.abs(seg.curve) > 2.5 && i % 12 === 0) {
@@ -181,18 +192,29 @@
     if (spec.endMark && segs.length > 260) segs[segs.length - 230].sprites.push({ kind: spec.endMark, offset: spec.water === 'left' ? 3.2 : -3.2, seed: 7 });
     if (spec.startMark && segs[10]) segs[10].sprites.push({ kind: spec.startMark, offset: spec.water === 'left' ? 3 : -3, seed: 5 });
     if (spec.banner && segs[5]) segs[5].sprites.push({ kind: 'banner', offset: 0, text: spec.banner });
-    if (spec.fork) segs[Math.max(0, segs.length - 70)].sprites.push({ kind: 'fork', offset: 0, texts: spec.fork });
-    if (spec.fork) segs[Math.max(0, segs.length - 140)].sprites.push({ kind: 'fork', offset: 0, texts: spec.fork });
+    var nS = segs.length;
+    if (spec.fork && !spec.custom) segs[Math.max(0, nS - 70)].sprites.push({ kind: 'fork', offset: 0, texts: spec.fork });
+    if (spec.fork) segs[Math.max(0, nS - (spec.custom ? Math.min(90, Math.floor(nS * 0.55)) : 140))].sprites.push({ kind: 'fork', offset: 0, texts: spec.fork, blue: !!spec.custom });
     if (spec.junction) {
-      var jl = segs.length;
-      segs[jl - 41].crosswalk = segs[jl - 40].crosswalk = true;
-      segs[jl - 40].stopLine = true;
-      for (var jc = jl - 38; jc < jl - 30; jc++) segs[jc].cross = true;
-      if (spec.junction.signal) segs[jl - 40].sprites.push({ kind: 'signal', offset: 1.25 });
-      spec.stopSeg = jl - 40; spec.crossSeg = jl - 34;
+      var jl = nS;
+      if (spec.custom) {
+        // 実在の交差点: 区間の終わり = 交差点の中心
+        var jw = Math.max(6, Math.round((spec.junction.w || 12) / 1.3));
+        var stp = Math.max(2, jl - jw - 3);
+        segs[stp].crosswalk = segs[stp + 1].crosswalk = true; segs[stp - 1].stopLine = true;
+        for (var jc = stp + 2; jc < jl; jc++) segs[jc].cross = true;
+        if (spec.junction.signal) segs[stp - 1].sprites.push({ kind: 'signal', offset: 1.18, city: true });
+        spec.stopSeg = stp - 1; spec.crossSeg = Math.min(jl - 2, stp + 2 + Math.floor(jw / 2));
+      } else {
+        segs[jl - 41].crosswalk = segs[jl - 40].crosswalk = true;
+        segs[jl - 40].stopLine = true;
+        for (var jc2 = jl - 38; jc2 < jl - 30; jc2++) segs[jc2].cross = true;
+        if (spec.junction.signal) segs[jl - 40].sprites.push({ kind: 'signal', offset: 1.25 });
+        spec.stopSeg = jl - 40; spec.crossSeg = jl - 34;
+      }
     }
-    if (spec.limit && segs[25]) { segs[25].sprites.push({ kind: 'limitsign', offset: -1.3, n: spec.limit }); if (segs.length > 900) segs[Math.floor(segs.length / 2)].sprites.push({ kind: 'limitsign', offset: -1.3, n: spec.limit }); }
-    if (spec.orbis && segs.length > 600) { segs[Math.floor(segs.length * 0.55)].sprites.push({ kind: 'orbis', offset: 0 }); spec.orbisSeg = Math.floor(segs.length * 0.55); }
+    if (spec.limit && segs[25] && !spec.custom) { segs[25].sprites.push({ kind: 'limitsign', offset: -1.3, n: spec.limit }); if (segs.length > 900) segs[Math.floor(segs.length / 2)].sprites.push({ kind: 'limitsign', offset: -1.3, n: spec.limit }); }
+    if (spec.orbis && segs.length > 600 && !(spec.custom && spec.hwy === false)) { segs[Math.floor(segs.length * 0.55)].sprites.push({ kind: 'orbis', offset: 0 }); spec.orbisSeg = Math.floor(segs.length * 0.55); }
     if (spec.stopZone) for (var z = spec.stopZone[0]; z <= spec.stopZone[1]; z++) segs[z].stopZone = true;
     if ((spec.touge || spec.p2p) && !spec.finishAt) spec.finishAt = segs.length - 150;
     if (spec.finishAt) { segs[spec.finishAt].finishLine = true; segs[spec.finishAt].sprites.push({ kind: 'gantry', offset: 0 }); }
@@ -201,7 +223,15 @@
       for (var k = 0; k < 3; k++) segs[k].finishLine = true;
     }
 
-    // ミニマップ用の道筋（一周でちょうど 360 度回るよう補正）
+    // ミニマップ用の道筋（実在の道は本当の形。それ以外は一周でちょうど 360 度回るよう補正）
+    if (segs[0] && segs[0].wp) {
+      var mnx = Infinity, mxx = -Infinity, mnz = Infinity, mxz = -Infinity;
+      segs.forEach(function (s) { mnx = Math.min(mnx, s.wp.x); mxx = Math.max(mxx, s.wp.x); mnz = Math.min(mnz, s.wp.z); mxz = Math.max(mxz, s.wp.z); });
+      var sc0 = 1 / Math.max(1, mxx - mnx, mxz - mnz), ox0 = (1 - (mxx - mnx) * sc0) / 2, oz0 = (1 - (mxz - mnz) * sc0) / 2;
+      var map0 = segs.map(function (s) { return [(s.wp.x - mnx) * sc0 + ox0, (s.wp.z - mnz) * sc0 + oz0]; });
+      if (!spec.custom) segs.forEach(function (s) { s.waterSide = spec.water || null; });
+      return { id: id, spec: spec, pal: pal, segs: segs, length: segs.length * SEG, map: map0 };
+    }
     var heading = 0, x = 0, y = 0, pts = [];
     var total = segs.reduce(function (a, s) { return a + s.curve; }, 0);
     var absTotal = segs.reduce(function (a, s) { return a + Math.abs(s.curve); }, 0) || 1;
@@ -308,6 +338,7 @@
 
     if (B.open) { drawFormula(g, x, y, w, h, color, opt); return; }
     if (B.kart || B.buggy || B.tractor || B.monster) { drawFun(g, x, y, w, h, color, B, opt); return; }
+    if (opt.front && !B.train) { drawFront(g, x, y, w, h, color, B, opt, body); return; }
 
     // タイヤ
     var tw = w * 0.17, th = h * (B.box ? 0.22 : 0.32);
@@ -438,6 +469,58 @@
     labelCar(g, x, y, w, h, opt);
   }
 
+  /** 対向車（前から見た姿）: フロントガラス・グリル・ヘッドライト */
+  function drawFront(g, x, y, w, h, color, B, opt, body) {
+    var tw = w * 0.16, th = h * (B.box ? 0.2 : 0.28);
+    g.fillStyle = '#111'; g.fillRect(x - w * 0.49, y - th, tw, th); g.fillRect(x + w * 0.49 - tw, y - th, tw, th);
+    var night = opt.night;
+    if (B.box) {
+      // キャブの正面（トラック・バス・バン）
+      var cabC = B.ribs ? '#e9ecef' : color;
+      var gr = g.createLinearGradient(0, y - h, 0, y - h * 0.15);
+      gr.addColorStop(0, shade(cabC, 1.1)); gr.addColorStop(1, shade(cabC, 0.75));
+      g.fillStyle = gr; g.fillRect(x - w * 0.48, y - h * 0.98, w * 0.96, h * 0.82);
+      if (B.ribs) { g.fillStyle = shade(color, 0.9); g.fillRect(x - w * 0.5, y - h * 1.06, w * 1.0, h * 0.1); }   // 後ろの荷台の頭
+      var wg = g.createLinearGradient(0, y - h * 0.94, 0, y - h * 0.55);
+      wg.addColorStop(0, '#6b7c92'); wg.addColorStop(0.5, '#27324a'); wg.addColorStop(1, '#141a26');
+      g.fillStyle = wg; g.fillRect(x - w * 0.43, y - h * 0.92, w * 0.86, h * (B.windows ? 0.34 : 0.36));
+      if (w > 18) { g.fillStyle = '#111'; g.fillRect(x - w * 0.3, y - h * 0.58, w * 0.22, Math.max(1, h * 0.012)); g.fillRect(x + w * 0.08, y - h * 0.58, w * 0.22, Math.max(1, h * 0.012)); }
+      g.fillStyle = '#2a2d33'; g.fillRect(x - w * 0.36, y - h * 0.45, w * 0.72, h * 0.12);
+      if (w > 20) { g.fillStyle = 'rgba(255,255,255,.15)'; for (var gl = 0; gl < 4; gl++) g.fillRect(x - w * 0.36, y - h * (0.44 - gl * 0.03), w * 0.72, Math.max(1, h * 0.008)); }
+      g.fillStyle = '#fff6d8'; g.fillRect(x - w * 0.46, y - h * 0.36, w * 0.14, h * 0.07); g.fillRect(x + w * 0.32, y - h * 0.36, w * 0.14, h * 0.07);
+      g.fillStyle = '#ffb300'; g.fillRect(x - w * 0.46, y - h * 0.29, w * 0.06, h * 0.035); g.fillRect(x + w * 0.4, y - h * 0.29, w * 0.06, h * 0.035);
+      g.fillStyle = '#3a3d42'; g.fillRect(x - w * 0.5, y - h * 0.22, w * 1.0, h * 0.07);
+      if (w > 24) { g.fillStyle = '#f2f2f2'; g.fillRect(x - w * 0.08, y - h * 0.2, w * 0.16, h * 0.05); }
+      if (B.bar) { var on2 = Math.floor((opt.t || 0) * 6) % 2; g.fillStyle = on2 ? '#ff2d2d' : '#5a1010'; g.fillRect(x - w * 0.3, y - h * 1.04, w * 0.25, h * 0.06); g.fillStyle = on2 ? '#1a2a6a' : '#2d6bff'; g.fillRect(x + w * 0.05, y - h * 1.04, w * 0.25, h * 0.06); }
+    } else {
+      var gr2 = g.createLinearGradient(0, y - h * B.body, 0, y - h * 0.2);
+      gr2.addColorStop(0, shade(color, 1.16)); gr2.addColorStop(0.5, color); gr2.addColorStop(1, shade(color, 0.68));
+      g.fillStyle = gr2; g.fillRect(x - w * 0.48, y - h * B.body, w * 0.96, h * (B.body - 0.2));
+      var cab = B.cab, bt = y - h * B.body, tp = y - h * B.top;
+      poly(g, x - w * cab[0], bt, x + w * cab[0], bt, x + w * cab[1], tp, x - w * cab[1], tp, body === 'police' ? '#f2f2f2' : shade(color, 0.85));
+      var ib = bt - h * 0.02, it = tp + h * 0.04;
+      var wg2 = g.createLinearGradient(0, it, 0, ib);
+      wg2.addColorStop(0, '#8fa3bb'); wg2.addColorStop(0.35, '#3b4a63'); wg2.addColorStop(1, '#121822');
+      poly(g, x - w * (cab[0] - 0.03), ib, x + w * (cab[0] - 0.03), ib, x + w * (cab[1] - 0.03), it, x - w * (cab[1] - 0.03), it, wg2);
+      // ボンネットの線・グリル・ライト
+      if (w > 20) { g.fillStyle = 'rgba(255,255,255,.18)'; g.fillRect(x - w * 0.46, bt + h * 0.02, w * 0.92, Math.max(1, h * 0.02)); }
+      var gy = y - h * (B.body * 0.55);
+      g.fillStyle = '#1b1d22'; g.fillRect(x - w * 0.2, gy, w * 0.4, h * 0.1);
+      if (w > 22) { g.fillStyle = 'rgba(200,200,210,.35)'; g.fillRect(x - w * 0.2, gy + h * 0.045, w * 0.4, Math.max(1, h * 0.012)); }
+      g.fillStyle = '#fff6d8';
+      poly(g, x - w * 0.46, gy, x - w * 0.24, gy, x - w * 0.24, gy + h * 0.08, x - w * 0.45, gy + h * 0.06, '#fff6d8');
+      poly(g, x + w * 0.46, gy, x + w * 0.24, gy, x + w * 0.24, gy + h * 0.08, x + w * 0.45, gy + h * 0.06, '#fff6d8');
+      g.fillStyle = shade(color, 0.55); g.fillRect(x - w * 0.49, y - h * 0.26, w * 0.98, h * 0.08);
+      if (w > 24) { g.fillStyle = '#f2f2f2'; g.fillRect(x - w * 0.08, y - h * 0.25, w * 0.16, h * 0.06); }
+      if (B.taxi) { g.fillStyle = '#fafafa'; g.fillRect(x - w * 0.14, tp - h * 0.12, w * 0.28, h * 0.12); }
+      if (B.bar) { var on = Math.floor((opt.t || 0) * 6) % 2; g.fillStyle = on ? '#ff2d2d' : '#5a1010'; g.fillRect(x - w * 0.2, tp - h * 0.1, w * 0.2, h * 0.1); g.fillStyle = on ? '#1a2a6a' : '#2d6bff'; g.fillRect(x, tp - h * 0.1, w * 0.2, h * 0.1); }
+    }
+    if (night && w > 8) {   // 夜のヘッドライトのまぶしさ
+      g.fillStyle = 'rgba(255,245,210,.28)';
+      g.beginPath(); g.arc(x - w * 0.36, y - h * 0.32, w * 0.3, 0, Math.PI * 2); g.arc(x + w * 0.36, y - h * 0.32, w * 0.3, 0, Math.PI * 2); g.fill();
+    }
+  }
+
   function drawFormula(g, x, y, w, h, color, opt) {
     var tw = w * 0.24, th = h * 0.55;
     g.fillStyle = '#111';
@@ -532,7 +615,36 @@
 
   function drawSprite(g, sp, x, y, s, night, t) {
     var u = s * 0.12, i, k;
+    // 実在の道の飾りは実寸（1u ≒ 1.1m）で描く
+    if (sp.city) u = s * UNITS_M * H / (ROAD_W * W) * 1.1;
+    var dir = sp.offset > 0 ? -1 : 1;   // 道の中央へ向かう向き
     switch (sp.kind) {
+      case 'pole':   // 電柱（コンクリート柱・腕金・変圧器）
+        if (u < 0.08) break;
+        g.fillStyle = night ? '#4a4d52' : '#9ea1a0'; g.fillRect(x - u * 0.17, y - u * 9.6, u * 0.34, u * 9.6);
+        g.fillStyle = 'rgba(0,0,0,.18)'; g.fillRect(x + u * 0.05, y - u * 9.6, u * 0.12, u * 9.6);
+        g.fillStyle = night ? '#2e3136' : '#6b6e70';
+        g.fillRect(x - u * 0.9, y - u * 9.3, u * 1.8, u * 0.12); g.fillRect(x - u * 0.7, y - u * 8.5, u * 1.4, u * 0.1);
+        if ((sp.id || 0) % 3 === 0) { g.fillStyle = night ? '#3b4046' : '#8d9499'; g.fillRect(x + dir * u * 0.25 - u * 0.3, y - u * 7.6, u * 0.6, u * 0.9); }
+        if (u > 1.2) { g.fillStyle = '#f5d000'; g.fillRect(x - u * 0.17, y - u * 2.4, u * 0.34, u * 0.5); g.fillStyle = '#222'; g.fillRect(x - u * 0.17, y - u * 2.2, u * 0.34, u * 0.08); }
+        break;
+      case 'streetlamp':   // 幹線道路の街灯（道の上へ腕がのびる）
+        g.fillStyle = '#6c7278'; g.fillRect(x - u * 0.12, y - u * 8.2, u * 0.24, u * 8.2);
+        g.fillRect(Math.min(x, x + dir * u * 2.6), y - u * 8.3, u * 2.6, u * 0.16);
+        g.fillStyle = night ? '#fff1b8' : '#d7dbe0'; g.fillRect(x + dir * u * 2.6 - u * 0.5, y - u * 8.3, u, u * 0.3);
+        if (night) circle(g, x + dir * u * 2.6, y - u * 7.9, u * 2.4, 'rgba(255,230,160,.12)');
+        break;
+      case 'hwlamp':
+        g.fillStyle = '#7b8288'; g.fillRect(x - u * 0.14, y - u * 10.5, u * 0.28, u * 10.5);
+        g.fillRect(Math.min(x, x + dir * u * 2), y - u * 10.6, u * 2, u * 0.18);
+        g.fillStyle = night ? '#ffd48a' : '#cfd4d8'; g.fillRect(x + dir * u * 2 - u * 0.5, y - u * 10.6, u, u * 0.28);
+        if (night) circle(g, x + dir * u * 2, y - u * 10.2, u * 2.6, 'rgba(255,200,120,.13)');
+        break;
+      case 'broadleaf':   // 広葉樹
+        g.fillStyle = '#4e3b2c'; g.fillRect(x - u * 0.25, y - u * 3, u * 0.5, u * 3);
+        var lc = night ? '#1f3322' : ['#3f6b3a', '#4b7a3f', '#355f33', '#56813f'][sp.seed % 4];
+        circle(g, x - u * 1.3, y - u * 4, u * 1.9, shade(lc, 0.85)); circle(g, x + u * 1.3, y - u * 4.2, u * 1.9, lc); circle(g, x, y - u * 5.4, u * 2.1, shade(lc, 1.12));
+        break;
       case 'tree':
         g.fillStyle = '#5b3a1e'; g.fillRect(x - u * 0.3, y - u * 2, u * 0.6, u * 2);
         poly(g, x - u * 2, y - u * 1.6, x + u * 2, y - u * 1.6, x + u * 0.2, y - u * 5, x - u * 0.2, y - u * 5, '#1f6b3a');
@@ -838,7 +950,8 @@
       case 'banner': case 'fork':
         var bh2 = s * (sp.kind === 'fork' ? 0.32 : 0.2), half2 = s * 1.15, top2 = y - s * 1.05;
         g.fillStyle = '#444'; g.fillRect(x - half2, top2, s * 0.04, y - top2); g.fillRect(x + half2 - s * 0.04, top2, s * 0.04, y - top2);
-        g.fillStyle = sp.kind === 'fork' ? '#1b7a3e' : '#0d47a1'; g.fillRect(x - half2, top2, half2 * 2, bh2);
+        g.fillStyle = sp.kind === 'fork' ? (sp.blue ? '#1d4fa3' : '#1b7a3e') : '#0d47a1'; g.fillRect(x - half2, top2, half2 * 2, bh2);
+        if (sp.blue) { g.strokeStyle = '#fff'; g.lineWidth = Math.max(1, s * 0.01); g.strokeRect(x - half2 + s * 0.02, top2 + s * 0.02, half2 * 2 - s * 0.04, bh2 - s * 0.04); }
         if (s > 24) {
           g.fillStyle = '#fff'; g.textAlign = 'center';
           g.font = 'bold ' + Math.max(7, Math.round(s * (sp.kind === 'fork' ? 0.09 : 0.1))) + 'px sans-serif';
@@ -1099,12 +1212,15 @@
     if (mode === 'duel' || mode === 'drag' || mode === 'sp') P.x = 0.45;
     if (cfg.start) {   // 前の道から引き継ぐ（オープンワールド）
       ['speed', 'x', 'nitro', 'damage', 'total'].forEach(function (k) { if (cfg.start[k] !== undefined) P[k] = cfg.start[k]; });
-      if (cfg.start.frac !== undefined) P.total = clamp(cfg.start.frac, 0, 0.95) * trackLen;
+      if (cfg.start.frac !== undefined) P.total = clamp(cfg.start.frac, 0, 0.95) * (spec.jEnd ? spec.jEnd * SEG : trackLen);
+      if (cfg.start.fromEnd !== undefined) P.total = Math.max(0, (spec.jEnd ? spec.jEnd * SEG : trackLen) - (cfg.start.fromEnd + 6) * SEG);
+      if (cfg.start.rev) P.rev = true;
       P.pos = P.total % trackLen;
     }
     var GEAR_TOP = [0.3, 0.48, 0.66, 0.84, 1.02], GEAR_ACC = [2.3, 1.75, 1.4, 1.12, 0.92];
     P.gear = 1; P.rpm = 0; P.maxSpeed = 0; P.stopT = 0;
     var edgeDone = false, coinsGot = 0;
+    var edgeLen = spec.jEnd ? spec.jEnd * SEG : trackLen;   // 交差点（この道の終わり）までの長さ
     var p2p = !!(spec.touge || spec.p2p) || mode === 'drag';
     var goalDist = mode === 'drag' ? SEG * Math.round(402 / MPS) : (spec.finishAt ? spec.finishAt * SEG - PLAYER_Z : Infinity);
     var dragLen = goalDist;
@@ -1215,7 +1331,7 @@
     }
     if (mode === 'gymkhana') {
       for (var gi = 30, gk = 0; gi < spec.finishAt - 10; gi += 20, gk++) {
-        var goff = clamp((gk % 2 ? 0.38 : -0.38) - segs[gi].curve * 0.03, -0.7, 0.7);
+        var goff = clamp((gk % 2 ? 0.38 : -0.38) - cv(segs[gi]) * 0.03, -0.7, 0.7);
         segs[gi].objs.push({ kind: 'cone', offset: goff - 0.27 }, { kind: 'cone', offset: goff + 0.27 });
         gates.push({ z: (gi + 0.5) * SEG, off: goff, done: false });
       }
@@ -1270,12 +1386,28 @@
       racers().forEach(function (c) { if (c.total > me) n++; });
       return n;
     }
-    function kmh(v) { return Math.round(v / MAX * 280); }
+    function kmh(v) { return Math.round(Math.abs(v) / MAX * 280); }
+    function canReverse() { return mode !== 'drag' && mode !== 'brake' && !P.finished && state === 'race'; }
+    /* ウインカー: -1 左 / 0 なし / 1 右。交差点ではこれで曲がる方向を決める */
+    P.blink = 0;
+    function chooseExit() {
+      var d = cfg.exitDirs, i, best = -1;
+      if (P.blink < 0) { for (i = 0; i < d.length; i++) if (d[i] === 'left' || d[i] === 'uturn') { best = i; break; } }
+      else if (P.blink > 0) { for (i = d.length - 1; i >= 0; i--) if (d[i] === 'right' || d[i] === 'uturn') { best = i; break; } }
+      if (best < 0) {
+        best = d.indexOf('straight');
+        if (best < 0) best = cfg.exitDefault !== undefined ? cfg.exitDefault : 0;
+        if (P.blink < 0) best = 0; else if (P.blink > 0) best = d.length - 1;
+      }
+      return best;
+    }
+    sess.exitChoice = function () { return cfg.exitDirs ? chooseExit() : null; };
+    function cv(sg) { return sg.phys !== undefined ? sg.phys : sg.curve; }   // 物理で使うカーブ（実在の道は別に持つ）
 
     /* --- 自動運転（見本走行・ゴール後・テスト用） --- */
     function autopilot() {
       var ahead = findSeg(pz() + SEG * 10), far = findSeg(pz() + SEG * 22);
-      var tx = clamp(-(ahead.curve * 0.08 + far.curve * 0.04), -0.65, 0.65);
+      var tx = clamp(-(cv(ahead) * 0.08 + cv(far) * 0.04), -0.65, 0.65);
       if (twoWay) tx = -0.5;
       if (targetCar && !targetCar.caught && targetCar.total - pz() < SEG * 40) tx = targetCar.offset;
       cars.concat(traffic).forEach(function (c) {
@@ -1285,15 +1417,23 @@
       });
       tx = clamp(tx, -0.8, 0.8);
       keys.left = P.x > tx + 0.06; keys.right = P.x < tx - 0.06;
-      var sharp = Math.max(Math.abs(ahead.curve), Math.abs(far.curve)) > 4.5 && P.speed > topSpeed * 0.84;
+      var sharp = Math.max(Math.abs(cv(ahead)), Math.abs(cv(far))) > 4.5 && P.speed > topSpeed * 0.84;
       keys.up = !sharp; keys.down = sharp && P.speed > topSpeed * 0.92;
-      keys.nitro = Math.abs(ahead.curve) < 1.2 && Math.abs(far.curve) < 2 && P.nitro > 0.45;
+      keys.nitro = Math.abs(cv(ahead)) < 1.2 && Math.abs(cv(far)) < 2 && P.nitro > 0.45;
+      if (spec.custom) {   // 実在の道: この先のカーブと制限速度に合わせて速さを決める
+        var look = Math.min(260, 20 + P.speed * P.speed / (2 * BRAKE) / SEG * 1.2), vOk = limitKmh && mode === 'world' ? (limitKmh + 8) / 280 * MAX : topSpeed;
+        for (var la = 2; la < look; la += 2) {
+          var sgA = findSeg(pz() + SEG * la), pc = Math.abs(cv(sgA));
+          if (pc > 0.5) { var vv = MAX * Math.min(1, 2.3 / pc); vOk = Math.min(vOk, Math.sqrt(vv * vv + 2 * BRAKE * SEG * Math.max(0, la - 4))); }
+        }
+        keys.up = P.speed < vOk * 0.97; keys.down = P.speed > vOk * 1.03; keys.nitro = false;
+      }
       if (mode === 'drag') { keys.nitro = P.rpm > 0.86; keys.left = keys.right = false; }
       if (mode === 'brake') { var dz = (cfg.stopAt + 0.5) * SEG - pz(), stopD = P.speed * P.speed / (2 * BRAKE); keys.up = dz > stopD * 1.02; keys.down = !keys.up; keys.nitro = false; }
     }
 
     /* --- 更新 --- */
-    var geom = spec.touge || spec.narrow ? { rw: 1350, cw: 0.19, lanes: 2 } : { rw: 2000, cw: 0.13, lanes: 3 };
+    var geom = spec.geom ? { rw: spec.geom.rw, cw: spec.geom.cw, lanes: spec.geom.lanes } : spec.touge || spec.narrow ? { rw: 1350, cw: 0.19, lanes: 2 } : { rw: 2000, cw: 0.13, lanes: 3 };
     function useGeom() { ROAD_W = geom.rw; CAR_W = geom.cw; OVERLAP = CAR_W * 2 * 0.9; LANES = geom.lanes; }
     function update(dt) {
       useGeom();
@@ -1333,8 +1473,9 @@
         if (keys.left) P.x -= dxs;
         else if (keys.right) P.x += dxs;
       }
-      P.x -= dxc * pct * seg.curve * CENTRIFUGAL * grip;
-      P.skid = (Math.abs(seg.curve) > 3 && pct > 0.7 && ((seg.curve > 0 && keys.right) || (seg.curve < 0 && keys.left))) ? 1 : 0;
+      var sc = cv(seg);
+      P.x -= dxc * Math.abs(pct) * sc * CENTRIFUGAL * grip;
+      P.skid = (Math.abs(sc) > 3 && pct > 0.7 && ((sc > 0 && keys.right) || (sc < 0 && keys.left))) ? 1 : 0;
 
       // スリップストリーム
       P.draft = 0;
@@ -1375,9 +1516,20 @@
         }
         P.shiftHeld = !!keys.nitro;
         limit = topSpeed * 1.1;
+      } else if (P.rev) {
+        // バック（後退ギア）: ↓で下がる、↑でブレーキ → 止まったら前進に戻る
+        if (keys.down) P.speed -= accel * 0.45 * dt;
+        else if (keys.up) P.speed += BRAKE * dt;
+        else P.speed = Math.min(0, P.speed + COAST * dt);
+        if (P.speed >= 0 && keys.up) { P.rev = false; P.speed = 0; }
       } else if (keys.up || P.boosting) P.speed += (P.boosting ? accel * 1.6 : accel) * dt;
-      else if (keys.down) P.speed -= BRAKE * dt;
+      else if (keys.down) {
+        P.speed -= BRAKE * dt;
+        // 止まってから↓を押し続けるとバックに入る
+        if (P.speed <= MAX * 0.004 && canReverse()) { P.revT = (P.revT || 0) + dt; if (P.revT > 0.35) { P.rev = true; P.revT = 0; pop(L('R（バック）', 'REVERSE'), '#cfd8dc'); } }
+      }
       else P.speed -= COAST * dt;
+      if (!keys.down) P.revT = 0;
 
       // 芝生・壁・飾り
       var off = P.x < -1 || P.x > 1;
@@ -1413,25 +1565,34 @@
       if (P.hitCool > 0) P.hitCool -= dt;
       racers().concat(traffic).forEach(function (c) { contact(c, dt); });
 
-      P.speed = clamp(P.speed, 0, limit);
+      P.speed = clamp(P.speed, P.rev ? -MAX * 0.09 : 0, limit);
       P.x = clamp(P.x, -2.6, 2.6);
       if (P.bump > 0) P.bump -= dt;
       topKmh = Math.max(topKmh, kmh(P.speed));
 
       var move = P.speed * dt;
+      if (move < 0 && P.total + move < 0) {
+        if (mode === 'world' && !edgeDone && cfg.onEdgeEnd && cfg.canBack) {
+          edgeDone = true;
+          cfg.onEdgeEnd({ speed: P.speed, x: P.x, nitro: P.nitro, damage: P.damage, back: true });
+        }
+        move = -P.total; P.speed = 0;
+      }
       P.pos += move;
       P.total += move;
       while (P.pos >= trackLen) P.pos -= trackLen;
+      while (P.pos < 0) P.pos += trackLen;
       if (!demo && state === 'race') {
         R._km = (R._km || 0) + move / SEG * MPS / 1000;
       }
 
       P.maxSpeed = Math.max(P.maxSpeed, P.speed);
-      if (cfg.onTick && !demo) cfg.onTick(dt, { speed: P.speed, damage: P.damage, x: P.x, kmh: kmh(P.speed) });
-      if (mode === 'world' && !edgeDone && P.total >= trackLen - SEG * 3) {
+      if (cfg.onTick && !demo) cfg.onTick(dt, { speed: P.speed, damage: P.damage, x: P.x, kmh: kmh(P.speed), frac: P.total / edgeLen });
+      if (mode === 'world' && !edgeDone && P.total >= edgeLen - SEG * 3) {
         edgeDone = true;
         var nx = cfg.exits || 1, ch = 0;
-        if (nx === 2) ch = P.x < 0 ? 0 : 1;
+        if (cfg.exitDirs) ch = chooseExit();   // ウインカーで選ぶ（車線はそのまま）
+        else if (nx === 2) ch = P.x < 0 ? 0 : 1;
         else if (nx >= 3) ch = P.x < -0.3 ? 0 : P.x > 0.3 ? 2 : 1;
         if (sirenA) { sirenA.stop(); sirenA = null; }
         if (cfg.onEdgeEnd) cfg.onEdgeEnd({ speed: P.speed, x: clamp(P.x, -0.9, 0.9), nitro: P.nitro, damage: P.damage, choice: ch,
@@ -1511,10 +1672,11 @@
         prevRank = rk;
       }
 
-      skyOff += dt * pct * seg.curve * 0.0012;
-      hillOff += dt * pct * seg.curve * 0.0025;
-      eng.update({ speed: P.speed / topSpeed, throttle: keys.up || P.boosting || (mode === 'drag' && !P.finished && state === 'race'), boost: P.boosting,
-                   skid: P.skid || P.spin > 0 || (Math.abs(seg.curve) > 4 && pct > 0.75), off: (P.x < -1 || P.x > 1) && !seg.tunnel && !seg.rails,
+      var skc = clamp(seg.curve, -8, 8);
+      skyOff += dt * pct * skc * 0.0012;
+      hillOff += dt * pct * skc * 0.0025;
+      eng.update({ speed: Math.abs(P.speed) / topSpeed, throttle: (P.rev ? keys.down : keys.up) || P.boosting || (mode === 'drag' && !P.finished && state === 'race'), boost: P.boosting,
+                   skid: P.skid || P.spin > 0 || (Math.abs(sc) > 4 && pct > 0.75), off: (P.x < -1 || P.x > 1) && !seg.tunnel && !seg.rails,
                    rain: weather === 'rain', rpm01: mode === 'drag' ? P.rpm : undefined });
       // すれ違い（近くの車を抜いたときの風の音）
       if (passT > 0) passT -= dt;
@@ -1725,7 +1887,7 @@
           return;
         }
         if (c.caught) { c.speed = Math.max(0, c.speed - MAX * 0.8 * dt); c.total += c.speed * dt; return; }
-        var cs = findSeg(c.total + SEG * 6), curv = Math.abs(cs.curve);
+        var cs = findSeg(c.total + SEG * 6), curv = Math.abs(cv(cs));
         var cp = c.ai === 'technician' ? 0.5 : c.ai === 'speedster' ? 1.6 : 1;
         var target = c.max * (1 - curv * 0.022 * (1.2 - c.skill) * cp) * ({ rain: 0.97, snow: 0.94 }[weather] || 1);
         var gap = pz() - c.total;
@@ -1785,7 +1947,7 @@
           c.laneT -= dt;
           if (c.laneT <= 0) { c.target = LANE_X[Math.floor(Math.random() * 3)]; c.laneT = 1.5 + Math.random() * 2; }
         }
-        if (!blocked && !c.isTarget && Math.random() < 0.01) c.target = clamp(-cs.curve * 0.12 + (Math.random() - 0.5) * 0.6, -0.8, 0.8);
+        if (!blocked && !c.isTarget && Math.random() < 0.01) c.target = clamp(-cv(cs) * 0.12 + (Math.random() - 0.5) * 0.6, -0.8, 0.8);
         c.target = clamp(c.target, -0.85, 0.85);
         c.offset += clamp(c.target - c.offset, -dt * (c.boss ? 1.1 : 0.9), dt * (c.boss ? 1.1 : 0.9));
 
@@ -1885,7 +2047,87 @@
     /* =====================================================================
        GUI の描画
        ===================================================================== */
-    var cache = {};
+    var cache = {}, frameNo = 0, wirePrev = {};
+    /* ---- 実在の街並み（疑似 3D で箱として描く） ---- */
+    function farSeg(sg, k) {
+      var j = Math.min(segs.length - 1, sg.index + k), f = segs[j];
+      while (j > sg.index && (f.pf !== frameNo || f.p1.camera.z <= DEPTH)) { j--; f = segs[j]; }
+      return f;
+    }
+    function sxOf(s2, o) { return s2.p1.screen.x + s2.p1.screen.scale * o * ROAD_W * W / 2; }
+    function syOf(s2, hm) { return s2.p1.screen.y - s2.p1.screen.scale * hm * UNITS_M * H / 2; }
+    function fogc(c, sg) { return sg.fog < 1 && pal.fog ? mix(c.charAt(0) === '#' ? c : '#888888', pal.fog, clamp(1 - sg.fog, 0, 1)) : c; }
+    function drawBldg(g, sg, sp) {
+      var fs = farSeg(sg, sp.len), sd = sp.offset > 0 ? 1 : -1;
+      var xa = sxOf(sg, sp.offset), xb = sxOf(sg, sp.off2), ya = sg.p1.screen.y, yt = syOf(sg, sp.hm);
+      var xa2 = sxOf(fs, sp.offset), xb2 = sxOf(fs, sp.off2), ya2 = fs.p1.screen.y, yt2 = syOf(fs, sp.hm);
+      if (Math.max(xa, xb, xa2) < -50 || Math.min(xa, xb, xa2) > W + 50 || ya - yt < 0.6) return;
+      var base = sp.c || '#cccccc', lit = night;
+      var cF = fogc(shade(base, lit ? 0.35 : 1.0), sg), cS = fogc(shade(base, lit ? 0.28 : (sd > 0 ? 0.78 : 0.9)), sg);
+      // 道に面した壁（奥へのびる面）
+      poly(g, xa, ya, xa, yt, xa2, yt2, xa2, ya2, cS);
+      var gable = sp.roof === 'gable' || sp.roof === 'temple', rh = gable ? (ya - yt) * 0.42 : 0;
+      if (gable) {
+        var xm = (xa + xb) / 2, xm2 = (xa2 + xb2) / 2, rc = fogc(shade(sp.rc || '#4a4f57', lit ? 0.4 : 1), sg);
+        poly(g, xa - (xb - xa) * 0.04, yt, xm, yt - rh, xm2, yt2 - (ya2 - yt2) * 0.42, xa2 - (xb2 - xa2) * 0.04, yt2, rc);
+      } else if (yt2 < yt - 0.5) {
+        poly(g, xa, yt, xb, yt, xb2, yt2, xa2, yt2, fogc(shade(base, 0.7), sg));   // 屋上（見下ろすとき）
+      }
+      // 手前の面
+      var x0 = Math.min(xa, xb), x1 = Math.max(xa, xb);
+      g.fillStyle = cF; g.fillRect(x0, yt, x1 - x0, ya - yt);
+      if (gable) poly(g, xa, yt, xb, yt, (xa + xb) / 2, yt - rh, (xa + xb) / 2, yt - rh, cF);
+      // 窓
+      var fh = ya - yt, fw = x1 - x0;
+      if (sp.win !== 'none' && fh > 14 && fw > 10 && sg.fog > 0.35) {
+        var floors = Math.max(1, Math.round(sp.hm / 3.1)), cols = Math.max(1, Math.min(14, Math.round(fw / fh * floors * 0.9)));
+        if (floors > 22) floors = 22;
+        var ww = fw / cols, hh = fh / floors, wc = lit ? 'rgba(255,214,120,.85)' : sp.win === 'grid' ? 'rgba(40,60,85,.55)' : 'rgba(30,40,55,.45)';
+        g.fillStyle = wc;
+        for (var fl = 0; fl < floors; fl++) for (var cc = 0; cc < cols; cc++) {
+          if (sp.win === 'house' && (fl + cc + sp.seed) % 3 === 0) continue;
+          if (lit && ((fl * 7 + cc * 3 + sp.seed) % 5) < 2) continue;
+          if (sp.win === 'factory' && fl > 0) continue;
+          g.fillRect(x0 + cc * ww + ww * 0.2, yt + fl * hh + hh * (sp.win === 'grid' ? 0.15 : 0.3), ww * (sp.win === 'grid' ? 0.62 : 0.5), hh * (sp.win === 'grid' ? 0.6 : 0.4));
+        }
+        // 側面の窓（遠近で詰める）
+        if (Math.abs(xa - xa2) > 12) {
+          var colsS = Math.max(1, Math.min(12, Math.round(sp.len * 1.3 / 3.6)));
+          for (var k2 = 0; k2 < colsS; k2++) {
+            var t1 = (k2 + 0.25) / colsS, t2 = (k2 + 0.7) / colsS;
+            var p1 = 1 - Math.pow(1 - t1, 2.2), p2 = 1 - Math.pow(1 - t2, 2.2);
+            var sx1 = xa + (xa2 - xa) * p1, sx2 = xa + (xa2 - xa) * p2;
+            var gy1 = ya + (ya2 - ya) * p1, gt1 = yt + (yt2 - yt) * p1;
+            for (fl = 0; fl < Math.min(floors, 14); fl++) {
+              if (sp.win === 'house' && (fl + k2 + sp.seed) % 2) continue;
+              if (lit && ((fl * 5 + k2 * 7 + sp.seed) % 5) < 2) continue;
+              var hy = (gy1 - gt1) / floors;
+              g.fillRect(Math.min(sx1, sx2), gt1 + fl * hy + hy * 0.28, Math.max(1, Math.abs(sx2 - sx1)), hy * 0.42);
+            }
+          }
+        }
+      }
+      if (sp.win === 'grid' && !lit && fh > 30) { g.fillStyle = 'rgba(255,255,255,.08)'; g.fillRect(x0, yt, fw * 0.12, fh); }
+    }
+    function drawWall(g, sg, sp) {   // 高速道路の遮音壁
+      var fs = farSeg(sg, sp.len), xa = sxOf(sg, sp.offset), xa2 = sxOf(fs, sp.offset);
+      var ya = sg.p1.screen.y, ya2 = fs.p1.screen.y, yt = syOf(sg, 3.5), yt2 = syOf(fs, 3.5);
+      poly(g, xa, ya, xa, yt, xa2, yt2, xa2, ya2, fogc(night ? '#39424c' : '#a8b6c0', sg));
+      g.fillStyle = 'rgba(255,255,255,.18)'; g.fillRect(Math.min(xa, xa2), yt, Math.max(1, Math.abs(xa2 - xa) * 0.08), ya - yt);
+    }
+    function wire(g, sp, sx, sg) {   // 電柱どうしを電線でつなぐ
+      var key = sp.offset > 0 ? 'r' : 'l', top = syOf(sg, 10.2), top2 = syOf(sg, 9.3), prev = wirePrev[key];
+      if (prev && sg.fog > 0.2) {
+        g.strokeStyle = night ? 'rgba(160,170,190,.35)' : 'rgba(40,40,45,.55)'; g.lineWidth = 1;
+        g.beginPath();
+        [[0, top, prev.t], [0.15, top2, prev.t2]].forEach(function (w2) {
+          var mx = (sx + prev.x) / 2, my = (w2[1] + w2[2]) / 2 + Math.abs(sx - prev.x) * 0.03;
+          g.moveTo(prev.x, w2[2]); g.quadraticCurveTo(mx, my, sx, w2[1]);
+        });
+        g.stroke();
+      }
+      wirePrev[key] = { x: sx, t: top, t2: top2 };
+    }
     function render(g) {
       useGeom();
       W = sess.W; H = sess.H;
@@ -1903,9 +2145,12 @@
       drawSky(g);
 
       // 道路（手前から奥へ）
+      frameNo++; wirePrev = {};
       for (n = 0; n < DRAW; n++) {
         var s = segs[(base.index + n) % segs.length];
         var looped = s.index < base.index;
+        if (looped && spec.custom && !spec.loop) break;   // 実在の道は先が別の道（ぐるっと戻らない）
+        s.pf = frameNo;
         s.fog = 1 / Math.pow(Math.E, Math.pow(n / DRAW, 2) * fogDensity);
         s.clip = maxy;
         s.drawn = false;
@@ -1934,7 +2179,7 @@
 
       for (n = DRAW - 1; n > 0; n--) {
         var sg = segs[(base.index + n) % segs.length];
-        if (!sg.p1.screen.scale || sg.p1.camera.z <= DEPTH) continue;
+        if (!sg.p1.screen.scale || sg.p1.camera.z <= DEPTH || sg.pf !== frameNo) continue;
         var scale = sg.p1.screen.scale;
         if (sg.tunnel) drawTunnel(g, sg, segs[(sg.index + segs.length - 1) % segs.length]);
         else if (sg.rails && sg.drawn) drawRails(g, sg);
@@ -1944,8 +2189,11 @@
           drawObj(g, o, sg.p1.screen.x + (scale * o.offset * ROAD_W * W / 2), sg.p1.screen.y, sg.p1.screen.w, t0);
         });
         sg.sprites.forEach(function (sp) {
+          if (sp.kind === 'bldg') { drawBldg(g, sg, sp); return; }
+          if (sp.kind === 'noisewall') { drawWall(g, sg, sp); return; }
           var sx = sg.p1.screen.x + (scale * sp.offset * ROAD_W * W / 2);
           drawSprite(g, sp, sx, sg.p1.screen.y, sg.p1.screen.w, night, t0);
+          if (sp.kind === 'pole') wire(g, sp, sx, sg);
         });
         (bySeg[sg.index] || []).forEach(function (e) {
           var o = e.o;
@@ -2118,9 +2366,15 @@
     function drawSegment(g, s) {
       var x1 = s.p1.screen.x, y1 = s.p1.screen.y, w1 = s.p1.screen.w;
       var x2 = s.p2.screen.x, y2 = s.p2.screen.y, w2 = s.p2.screen.w;
-      var r1 = w1 / 6, r2 = w2 / 6, l1 = w1 / 32, l2 = w2 / 32;
-      g.fillStyle = s.cGrass;
-      g.fillRect(0, y2 - 1, W, y1 - y2 + 1);
+      var r1 = s.rumW ? w1 * s.rumW : w1 / 6, r2 = s.rumW ? w2 * s.rumW : w2 / 6, l1 = w1 / 32, l2 = w2 / 32;
+      if (s.cGrassL) {   // 左右で違う地面（田んぼ・住宅地・森など）
+        var cx0 = Math.round((x1 + x2) / 2);
+        g.fillStyle = s.cGrassL; g.fillRect(0, y2 - 1, Math.max(0, cx0), y1 - y2 + 1);
+        g.fillStyle = s.cGrassR; g.fillRect(Math.max(0, cx0), y2 - 1, W - Math.max(0, cx0), y1 - y2 + 1);
+      } else {
+        g.fillStyle = s.cGrass;
+        g.fillRect(0, y2 - 1, W, y1 - y2 + 1);
+      }
       if (s.waterSide && !s.tunnel) {
         var wc = s.alt ? pal.water : shade(pal.water, 1.08);
         if (s.waterSide !== 'right') poly(g, -2, y1, x1 - w1 * 1.7, y1, x2 - w2 * 1.7, y2, -2, y2, wc);
@@ -2140,11 +2394,17 @@
         }
       } else {
         poly(g, x1 - w1, y1, x1 + w1, y1, x2 + w2, y2, x2 - w2, y2, s.stopZone ? '#b71c1c' : s.cRoad);
-        if (s.alt) {
-          var lw1 = w1 * 2 / LANES, lw2 = w2 * 2 / LANES, lx1 = x1 - w1 + lw1, lx2 = x2 - w2 + lw2;
-          for (var lane = 1; lane < LANES; lane++, lx1 += lw1, lx2 += lw2) {
-            poly(g, lx1 - l1 / 2, y1, lx1 + l1 / 2, y1, lx2 + l2 / 2, y2, lx2 - l2 / 2, y2, pal.lane);
-          }
+        var lw1 = w1 * 2 / LANES, lw2 = w2 * 2 / LANES, lx1 = x1 - w1 + lw1, lx2 = x2 - w2 + lw2;
+        for (var lane = 1; lane < LANES; lane++, lx1 += lw1, lx2 += lw2) {
+          var center = spec.twoWay && lane * 2 === LANES;
+          if (!s.alt && !(center && LANES >= 4)) continue;
+          if (s.cross) continue;
+          var lc2 = center && LANES >= 4 && spec.custom ? '#f0c030' : pal.lane;
+          poly(g, lx1 - l1 / 2, y1, lx1 + l1 / 2, y1, lx2 + l2 / 2, y2, lx2 - l2 / 2, y2, lc2);
+        }
+        if (s.curb) {   // 歩道の縁石
+          poly(g, x1 - w1 - r1 * 0.12, y1, x1 - w1, y1, x2 - w2, y2, x2 - w2 - r2 * 0.12, y2, '#8a8a86');
+          poly(g, x1 + w1, y1, x1 + w1 + r1 * 0.12, y1, x2 + w2 + r2 * 0.12, y2, x2 + w2, y2, '#8a8a86');
         }
         if (s.crosswalk) {
           for (var zk = 0; zk < 10; zk++) {
@@ -2367,7 +2627,7 @@
       // 右上: ミニマップ
       var ms = narrow ? 84 : 100, mx = W - ms - 8, my = 8;
       panel(g, mx, my, ms, ms);
-      if (cfg.drawMap) { cfg.drawMap(g, mx, my, ms, clamp(P.total / trackLen, 0, 1)); ms = -1; }
+      if (cfg.drawMap) { cfg.drawMap(g, mx, my, ms, clamp(P.total / edgeLen, 0, 1)); ms = -1; }
       if (ms > 0) {
       g.strokeStyle = 'rgba(255,255,255,.55)'; g.lineWidth = 2;
       if (!cache.mapPath) {
@@ -2412,7 +2672,7 @@
       g.strokeStyle = '#fff'; g.beginPath(); g.moveTo(gx, gy); g.lineTo(gx + Math.cos(na) * (rr - 8), gy + Math.sin(na) * (rr - 8)); g.stroke();
       text(g, String(sp), gx, gy + 16, 14, '#fff', 'center');
       text(g, 'km/h', gx, gy + 27, 8, '#9fb0c2', 'center');
-      var gear = P.speed < 1 ? 'N' : String(Math.min(6, 1 + Math.floor(P.speed / (topSpeed * nitroPower) * 6.5)));
+      var gear = P.rev ? 'R' : P.speed < 1 ? 'N' : String(Math.min(6, 1 + Math.floor(P.speed / (topSpeed * nitroPower) * 6.5)));
       text(g, gear, gx, gy - 8, 12, '#ffd93d', 'center');
 
       // 右下: ニトロ・ダメージ
@@ -2422,6 +2682,29 @@
 
       // 制限速度と追跡
       if (mode === 'world') {
+        // ウインカー（Q 左 / E 右）
+        var bon = Math.floor(t0 * 3) % 2 === 0;
+        g.fillStyle = P.blink < 0 && bon ? '#7CFC00' : 'rgba(255,255,255,.18)';
+        poly(g, gx - 28, gy - 44, gx - 16, gy - 51, gx - 16, gy - 37, gx - 16, gy - 37, g.fillStyle);
+        g.fillStyle = P.blink > 0 && bon ? '#7CFC00' : 'rgba(255,255,255,.18)';
+        poly(g, gx + 28, gy - 44, gx + 16, gy - 51, gx + 16, gy - 37, gx + 16, gy - 37, g.fillStyle);
+        // ナビ（次の交差点の曲がる方向）
+        var nv = cfg.navInfo ? cfg.navInfo() : null;
+        var toJ = Math.max(0, Math.round((edgeLen - pz()) / SEG * MPS));
+        var ch2 = sess.exitChoice ? sess.exitChoice() : null;
+        if (nv || (cfg.exitDirs && cfg.exitDirs.length > 1)) {
+          var ny = H - 100, nw2 = nv ? (narrow ? 190 : 250) : 150;
+          panel(g, W - nw2 - 8, ny - 30, nw2, 46);
+          if (nv) {
+            text(g, nv.arrow, W - nw2 + 16, ny + 4, 30, nv.dir === 'goal' ? '#ffd93d' : '#5ccfa0', 'center');
+            text(g, nv.text, W - nw2 + 36, ny - 12, 10, '#e8e8f0');
+          }
+          if (cfg.exitDirs && cfg.exitDirs.length > 1 && ch2 !== null) {
+            var dN = cfg.exitDirs[ch2], aw = { left: '←', right: '→', straight: '↑', uturn: '↶' }[dN];
+            var ok = !nv || nv.dir === dN || nv.dir === 'any' || nv.dir === 'goal';
+            text(g, L('この先 ', 'Ahead ') + toJ + 'm  ' + L('進路 ', 'route ') + aw, nv ? W - nw2 + 36 : W - nw2 + 4, ny + (nv ? 6 : -2), 11, ok ? '#9fe8c8' : '#ff8a80');
+          }
+        }
         if (limitKmh) {
           circle(g, 112, H - 70, 15, '#d32f2f'); circle(g, 112, H - 70, 12, '#ffffff');
           text(g, String(limitKmh), 112, H - 66, 11, '#1a47a0', 'center');
@@ -2859,9 +3142,11 @@
                 ArrowUp: 'up', w: 'up', W: 'up', ArrowDown: 'down', s: 'down', S: 'down',
                 ' ': 'nitro', Shift: 'nitro', n: 'nitro', N: 'nitro', x: 'nitro', X: 'nitro' }[k];
       if (m) keys[m] = down;
+      if (down && (k === 'q' || k === 'Q' || k === 'z' || k === 'Z' || k === ',')) { P.blink = P.blink === -1 ? 0 : -1; sfx('click'); return true; }
+      if (down && (k === 'e' || k === 'E' || k === 'c' || k === 'C' || k === '.')) { P.blink = P.blink === 1 ? 0 : 1; sfx('click'); return true; }
       if ((k === 'r' || k === 'R') && down && mode === 'world' && !edgeDone && P.speed < MAX * 0.15 && cfg.onEdgeEnd) {
         edgeDone = true;
-        cfg.onEdgeEnd({ speed: 0, x: -P.x, nitro: P.nitro, damage: P.damage, reverse: true, frac: P.total / trackLen });
+        cfg.onEdgeEnd({ speed: 0, x: -P.x, nitro: P.nitro, damage: P.damage, reverse: true, frac: clamp(P.total / edgeLen, 0, 1) });
         return true;
       }
       return !!m;
