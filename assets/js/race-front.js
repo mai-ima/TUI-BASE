@@ -1,0 +1,1693 @@
+/*
+ * race-front.js — TUI RACING の入口。メニュー・物語・オープンワールド・アルバイト・
+ * グランプリ・ガレージと race コマンド。
+ *
+ *   GUI 版 … 1 つのウィンドウの中に「タイトル → メニュー → レース → 結果」がある
+ *            （据え置き機のレースゲームのような画面遷移。キーボードでもマウスでも操作できる）
+ *   TUI 版 … ターミナルの中でメニューを文字で出し、レースは文字で描く
+ */
+(function () {
+  'use strict';
+
+  var TB = window.TB;
+  var R = TB.Race;
+  var U = R.util;
+  var L = U.L, clamp = U.clamp, fmt = U.fmt, sfx = U.sfx, yen = U.yen, pick = U.pick;
+  var def = TB.def;
+
+  function t(v) { return TB.t(v); }
+  function trackName(id) { return typeof id === 'string' ? t(R.TRACKS[id].name) : t(id.name); }
+  function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
+
+  /* =====================================================================
+     共通の計算
+     ===================================================================== */
+
+  var lenCache = {};
+  function trackLen(id) { if (!lenCache[id]) lenCache[id] = R.buildTrack(id, false, 'clear').length; return lenCache[id]; }
+  function estLap(id) { return trackLen(id) / (R.MAX * 0.8); }
+  function lapTarget(track, factor) { return trackLen(track) / (R.MAX * factor) * 1000; }
+  function isTouge(id) { return typeof id === 'string' && !!R.TRACKS[id].touge; }
+  function loopTracks() { return R.ORDER.slice(); }
+
+  function playerCar(s, forceId) {
+    var car = R.car(forceId || s.car);
+    return { id: car.id, body: car.body, color: R.carColor(s, car), stats: R.effStats(car, s.upg[car.id]),
+             offroad: !!car.offroad, siren: car.body === 'police' };
+  }
+
+  /** 今の愛車に合わせたライバルの速さ */
+  function carPace(s) { s = s || R.load(); return R.topOf(R.effStats(R.car(s.car), s.upg[s.car])) * 0.97; }
+
+  function baseCfg(o) {
+    var s = R.load();
+    var spec = typeof o.track === 'string' ? R.TRACKS[o.track] : o.track;
+    var weather = o.weather && o.weather !== 'auto' ? o.weather : (spec.weather || 'clear');
+    var mode = o.mode || 'race';
+    var cfg = {
+      track: o.track, mirror: !!o.mirror, weather: weather, mode: mode,
+      laps: o.laps || spec.laps || 2, field: o.field || [],
+      traffic: o.traffic !== undefined ? o.traffic : (spec.traffic || 0),
+      car: playerCar(s, o.carId), levelMul: R.LEVELS[o.level || s.level] || 1,
+      bestLap: typeof o.track === 'string' ? (s.laps[R.lapKey(o.track, o.mirror)] || null) : null,
+      casual: !!o.casual
+    };
+    if (mode === 'time') { cfg.ghost = R.loadGhost(o.track, o.mirror); cfg.field = []; cfg.traffic = 0; cfg.laps = o.laps || 3; }
+    if (mode === 'arcade') { var e = estLap(o.track); cfg.timeLimit = Math.round(e * 0.6 + 6); cfg.cpBonus = Math.round(e / 3 * 1.1); cfg.traffic = o.traffic || 14; cfg.laps = o.laps || 3; }
+    if (mode === 'chase') { cfg.timeLimit = 120; cfg.laps = Infinity; cfg.traffic = o.traffic !== undefined ? o.traffic : 10; }
+    if (mode === 'traffic') { cfg.laps = Infinity; cfg.traffic = o.traffic || 18; }
+    if (mode === 'coins') { cfg.laps = Infinity; cfg.timeLimit = 60; cfg.traffic = 0; }
+    if (mode === 'elim') cfg.laps = cfg.field.length;
+    return cfg;
+  }
+
+  /* ---------- ミニゲームのコース ---------- */
+  var MINI_SPEC = {
+    gymkhana: { id: 'mini-gym', name: { ja: 'ジムカーナ場', en: 'Gymkhana Course' }, pal: R.PAL.hwy, deco: ['tyrewall', 'soundwall', 'tyrewall'],
+                weather: 'clear', p2p: true,
+                build: function (b) { b.straight(15); b.curve(25, 3, 0); b.straight(20); b.curve(25, -4, 0); b.sCurves(3); b.curve(25, 5, 0); b.straight(30); b.curve(20, -5, 0); b.straight(70); } },
+    brake: { id: 'mini-brake', name: { ja: 'テストコース', en: 'Test Track' }, pal: R.PAL.hwy, deco: ['soundwall', 'greensign'], weather: 'clear',
+             stopZone: [300, 305], noFinish: true, build: function (b) { b.straight(150); } },
+    drag: { id: 'mini-drag', name: { ja: 'ドラッグストリップ', en: 'Drag Strip' }, pal: R.PAL.hmdune, deco: ['grandstand', 'billboard', 'tyrewall'],
+            weather: 'clear', finishAt: 314, build: function (b) { b.straight(150); } }
+  };
+
+  function miniCfg(kind) {
+    var s = R.load(), car = playerCar(s);
+    if (kind === 'coins') return baseCfg({ track: 'hamamatsu', mode: 'coins' });
+    var spec = MINI_SPEC[kind];
+    var cfg = { track: spec, weather: 'clear', mode: kind, laps: 1, field: [], traffic: 0, car: car, levelMul: 1 };
+    if (kind === 'brake') cfg.stopAt = 302.5;
+    if (kind === 'drag') {
+      var top = R.topOf(car.stats);
+      cfg.field = [{ name: pick(['DYNA', 'LYNX', 'JOLT', 'BOLT']), color: '#ff7043', body: pick(['muscle', 'fd', 'r32', 'evo']), ai: 'balanced', pace: top * 0.985, skill: 1 }];
+    }
+    return cfg;
+  }
+
+  /* ---------- 物語 ---------- */
+  function storyField(ev) {
+    if (ev.mode === 'duel' || ev.mode === 'chase' || ev.mode === 'touge') return [R.boss(ev.boss, ev.pace)];
+    if (!ev.rivals) return [];
+    var pool = ev.pool === 'gang' ? R.GANG : ev.pool === 'super' ? R.SUPERCARS : ev.pool === 'touge' ? R.TOUGE_DRIVERS : R.DRIVERS;
+    var f = R.makeField(ev.rivals, ev.pace, pool);
+    if (ev.boss) { f.pop(); f.unshift(R.boss(ev.boss, ev.pace * 1.02)); }
+    return f;
+  }
+  function storyCfg(ev) {
+    return baseCfg({ track: ev.track, mode: ev.mode, laps: ev.laps, field: storyField(ev), traffic: ev.traffic, carId: ev.car });
+  }
+
+  function goalText(goal, track) {
+    switch (goal.type) {
+      case 'place': return L(goal.n + ' 位以内でゴール', 'Finish in the top ' + goal.n);
+      case 'win': return L('1 位でゴール', 'Win');
+      case 'lap': return L('どれか 1 周を ' + fmt(lapTarget(track, goal.factor)) + ' 以内で走る', 'Run a lap under ' + fmt(lapTarget(track, goal.factor)));
+      case 'survive': return L('最後の 1 台まで生き残る', 'Survive every elimination');
+      case 'arcade': return L('制限時間内に全周回を走りきる', 'Finish all laps before time runs out');
+      case 'catch': return L('逃走車に体当たりして確保する', 'Ram the getaway car to a stop');
+      case 'score': return L(goal.n + ' 点以上をとる', 'Score ' + goal.n + ' or more');
+    }
+    return '';
+  }
+  function checkGoal(goal, r, track) {
+    var fin = r.reason === 'finish';
+    switch (goal.type) {
+      case 'place': return fin && r.place <= goal.n;
+      case 'win': return fin && r.place === 1;
+      case 'lap': return r.best !== null && r.best <= lapTarget(track, goal.factor);
+      case 'survive': case 'arcade': return fin;
+      case 'catch': return !!r.caught;
+      case 'score': return r.score >= goal.n;
+    }
+    return false;
+  }
+
+  /* ---------- 結果を記録して、見せる文章を作る ---------- */
+  var RACING = ['race', 'duel', 'elim', 'touge'];
+  function applyResult(ctx, r) {
+    var s = R.load(), out = { title: '', sub: '', lines: [], success: null, money: 0, table: null };
+    var mode = r.mode, trackId = typeof ctx.track === 'string' ? ctx.track : null;
+    var racing = RACING.indexOf(mode) >= 0, fin = r.reason === 'finish';
+    if (racing) out.table = r.list;
+    s.stats.km = Math.round(((s.stats.km || 0) + (r.km || 0)) * 10) / 10;
+    s.stats.near = (s.stats.near || 0) + (r.near || 0);
+    if (racing) {
+      s.stats.races++;
+      if (fin && r.place === 1) s.stats.wins++;
+      if (fin && r.place <= 3) s.stats.podiums++;
+    }
+    if (trackId && r.best && ['race', 'duel', 'time', 'arcade', 'touge', 'elim'].indexOf(mode) >= 0) {
+      var key = R.lapKey(trackId, ctx.mirror);
+      if (!s.laps[key] || r.best < s.laps[key]) { s.laps[key] = Math.round(r.best); out.lines.push(L('★ 自己ベスト更新 ', '★ New personal best ') + fmt(r.best)); }
+    }
+    if (r.ghost && trackId) { R.saveGhost(trackId, ctx.mirror, r.ghost); out.lines.push(L('ゴーストを保存しました', 'Ghost saved')); }
+
+    // 見出し
+    switch (mode) {
+      case 'race': case 'duel': out.title = !fin ? L('リタイア', 'Retired') : r.place === 1 ? L('優勝！', 'VICTORY!') : L(r.place + ' 位でゴール', 'Finished P' + r.place); break;
+      case 'touge': out.title = r.place === 1 ? L('峠バトル 勝利！', 'TOUGE WIN!') : L('峠バトル 敗北…', 'TOUGE LOSS...'); break;
+      case 'elim': out.title = fin ? L('生き残った！', 'LAST ONE STANDING!') : L('脱落…', 'ELIMINATED'); break;
+      case 'time': out.title = L('ベスト ', 'Best ') + fmt(r.best); break;
+      case 'arcade': out.title = fin ? L('ゴール！', 'FINISH!') : L('タイムアップ', "TIME'S UP"); break;
+      case 'chase': out.title = r.caught ? L('確保！', 'BUSTED!') : L('取り逃がした…', 'THEY GOT AWAY'); break;
+      case 'traffic': out.title = L('スコア ', 'Score ') + r.score; break;
+      case 'coins': out.title = L('コイン ', 'Coins ') + r.coins + L(' 枚', ''); break;
+      case 'brake': out.title = r.reason === 'stopped' ? L('停止位置 ', 'Stopped ') + (r.stopDist > 0 ? '+' : '') + r.stopDist.toFixed(1) + 'm' : L('止まれず…', 'Overshot'); break;
+      case 'drag': out.title = r.place === 1 ? L('勝ち！ ', 'WIN! ') + fmt(r.time * 1000) : L('負け… ', 'LOSS ') + fmt(r.time * 1000); break;
+      case 'gymkhana': out.title = L('タイム ', 'Time ') + fmt(r.total * 1000); break;
+    }
+    out.sub = (trackId ? trackName(trackId) : typeof ctx.track === 'object' ? t(ctx.track.name) : '') + '  ·  ' + t((R.MODES[mode] || R.MINIS[mode] || R.CASUAL[mode] || { name: { ja: '', en: '' } }).name);
+    if (r.best && ['race', 'duel', 'arcade'].indexOf(mode) >= 0) out.lines.push(L('ベストラップ ', 'Best lap ') + fmt(r.best));
+    if (mode === 'traffic') out.lines.push(L('ニアミス ', 'Near misses ') + r.near + L('　最大連続 ×', '  best chain ×') + r.maxCombo);
+    if (mode === 'gymkhana' && r.penalty) out.lines.push(L('走行 ', 'Run ') + fmt(r.time * 1000) + L('　ペナルティ +', '  penalty +') + r.penalty + 's');
+    if (mode === 'brake') out.lines.push(L('最高速 ', 'Top speed ') + r.maxKmh + 'km/h　' + L('得点 ', 'score ') + r.score);
+    if (r.topKmh && racing) out.lines.push(L('最高速 ', 'Top speed ') + r.topKmh + 'km/h' + (r.overtakes ? L('　追い抜き ', '  overtakes ') + r.overtakes : ''));
+
+    // 賞金
+    var money = 0, diff = trackId ? R.TRACKS[trackId].diff : 2, dm = 0.6 + diff * 0.15;
+    var lm = { easy: 0.7, normal: 1, hard: 1.4 }[ctx.level || s.level] || 1;
+    switch (ctx.kind) {
+      case 'quick': if (racing && fin) money = R.PRIZE[r.place - 1] * dm * lm * 0.5; break;
+      case 'party': if (fin) money = R.PRIZE[r.place - 1] * dm * lm * 0.4; money += (r.coins || 0) * 25;
+        if (r.coins) out.lines.push(L('コイン ', 'Coins ') + r.coins + L(' 枚', '')); break;
+      case 'gp': if (fin) money = R.PRIZE[r.place - 1] * dm; break;
+      case 'touge': if (r.place === 1) { money = 1400 * dm * lm; s.stats.touge = (s.stats.touge || 0) + 1; } break;
+      case 'challenge':
+        if (mode === 'elim' && fin) money = 1200 * dm;
+        if (mode === 'duel' && fin && r.place === 1) money = 1500 * dm;
+        if (mode === 'arcade' && fin) money = 1000 * dm;
+        if (mode === 'chase' && r.caught) money = 1500;
+        if (mode === 'traffic') money = r.score / 8;
+        break;
+      case 'mini':
+        var mk = mode, mv = mode === 'gymkhana' ? r.total * 1000 : mode === 'drag' ? r.time * 1000 : r.score;
+        var lower = mode === 'gymkhana' || mode === 'drag';
+        if (mode === 'coins') { money = r.coins * 20; mv = r.coins; }
+        if (mode === 'drag' && r.place === 1) money = 600;
+        if (mode === 'brake') money = r.score;
+        if (mode === 'gymkhana') money = Math.max(0, 2400 - r.total * 20);
+        if (mode === 'drag' && r.place !== 1) mv = null;
+        if (mv !== null && mv !== undefined && (s.mini[mk] === undefined || (lower ? mv < s.mini[mk] : mv > s.mini[mk]))) {
+          s.mini[mk] = Math.round(mv); out.lines.push(L('★ 自己ベスト', '★ Personal best'));
+        }
+        break;
+      case 'story':
+        var ev = ctx.ev, idx = R.STORY.indexOf(ev);
+        out.success = checkGoal(ev.goal, r, ev.track);
+        out.lines.unshift(out.success ? L('✔ 目標達成：', '✔ Objective complete: ') + goalText(ev.goal, ev.track) : L('✘ 目標未達成：', '✘ Objective failed: ') + goalText(ev.goal, ev.track));
+        if (out.success) {
+          money = s.story > idx ? ev.reward * 0.3 : ev.reward;
+          if (s.story <= idx) s.story = idx + 1;
+          if (ev.boss) s.bosses[ev.boss] = true;
+          if (ev.unlock && s.owned.indexOf(ev.unlock) < 0) { s.owned.push(ev.unlock); out.lines.push(L('🔓 新しい車「', '🔓 New car: ') + t(R.car(ev.unlock).name) + L('」が手に入った！', '')); }
+        }
+        break;
+    }
+    money = Math.round(money);
+    s.money += money; out.money = money;
+    if (money) out.lines.push(L('賞金 +', 'Prize +') + yen(money) + L('（所持 ', ' (total ') + yen(s.money) + ')');
+    R.save(s);
+    if (money) sfx('coin');
+    return out;
+  }
+
+  /* =====================================================================
+     グランプリ（カップ戦）
+     ===================================================================== */
+
+  function Cup(cupId) {
+    var cup = R.CUPS.filter(function (c) { return c.id === cupId; })[0];
+    var pool = cup.pool === 'touge' ? R.TOUGE_DRIVERS : cup.pool === 'super' ? R.SUPERCARS : R.DRIVERS;
+    var field = R.makeField(Math.min(7, pool.length), cup.pace, pool);
+    var st = { cup: cup, idx: 0, points: {}, field: field, done: false };
+    st.cfg = function () {
+      var id = cup.tracks[st.idx];
+      return baseCfg({ track: id, laps: isTouge(id) ? 1 : cup.laps, field: field.map(function (d) { var o = {}; for (var k in d) o[k] = d[k]; return o; }) });
+    };
+    st.result = function (r) {
+      var sum = applyResult({ kind: 'gp', track: cup.tracks[st.idx] }, r);
+      (r.list || []).forEach(function (e, i) { var n = e.you ? 'YOU' : e.name; st.points[n] = (st.points[n] || 0) + (r.reason === 'finish' || !e.you ? (R.POINTS[i] || 0) : 0); });
+      st.idx++;
+      sum.lines.push(L('第 ' + st.idx + ' 戦 / 全 ' + cup.tracks.length + ' 戦', 'Round ' + st.idx + ' of ' + cup.tracks.length));
+      return sum;
+    };
+    st.table = function () {
+      return ['YOU'].concat(field.map(function (d) { return d.name; }))
+        .map(function (n) { return { n: n, p: st.points[n] || 0 }; }).sort(function (a, b) { return b.p - a.p; });
+    };
+    st.over = function () { return st.idx >= cup.tracks.length; };
+    st.finish = function () {
+      var pos = st.table().findIndex(function (e) { return e.n === 'YOU'; }) + 1;
+      var bonus = pos <= 3 ? cup.bonus[pos - 1] : 0;
+      R.edit(function (s) {
+        s.money += bonus;
+        if (pos <= 3 && (!s.cups[cup.id] || pos < s.cups[cup.id])) s.cups[cup.id] = pos;
+        if (pos === 1) s.stats.titles++;
+      });
+      return { pos: pos, bonus: bonus };
+    };
+    return st;
+  }
+
+  /* =====================================================================
+     オープンワールド（アルバイトもここで）
+     ===================================================================== */
+
+  function hash(str) { var h = 7; for (var i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) % 2147483647; return h || 1; }
+  function srand(seed) { var s = seed; return function () { s = s * 16807 % 2147483647; return (s - 1) / 2147483646; }; }
+
+  function worldBuild(b, road, seed) {
+    var r = srand(seed), kind = road.kind;
+    function sg() { return r() < 0.5 ? -1 : 1; }
+    function n(a, bb) { return Math.round(a + r() * (bb - a)); }
+    b.straight(20);
+    var guard = 0;
+    while (b.segs.length < road.len - 160 && guard++ < 200) {
+      var x = r();
+      switch (kind) {
+        case 'city': case 'ngcity':
+          if (x < 0.35) b.straight(n(10, 25));
+          else if (x < 0.8) b.curve(n(14, 24), sg() * (4 + r() * 3), 0);
+          else if (kind === 'ngcity' && x < 0.9) b.tunnel(function () { b.straight(30); });
+          else b.hill(15, sg() * 8);
+          break;
+        case 'dune': if (x < 0.5) b.straight(n(20, 45)); else b.curve(n(25, 40), sg() * (2 + r() * 2), sg() * 10); break;
+        case 'lake': if (x < 0.3) b.straight(20); else b.curve(n(25, 45), sg() * (2 + r() * 3), 0); break;
+        case 'mount': if (x < 0.35) b.hill(25, sg() * (20 + r() * 20)); else if (x < 0.8) b.curve(n(20, 35), sg() * (4 + r() * 3), sg() * 15); else b.sCurves(4); break;
+        case 'hwy': if (x < 0.55) b.straight(n(40, 80)); else b.curve(n(50, 80), sg() * (1.2 + r() * 1.5), sg() * 8); break;
+        case 'hwymount':
+          if (x < 0.35) b.straight(40);
+          else if (x < 0.6) b.tunnel(function () { b.curve(40, sg() * 2, 0); b.straight(20); });
+          else b.curve(50, sg() * (1.5 + r() * 2), sg() * 20);
+          break;
+        default: if (x < 0.4) b.straight(20); else b.curve(n(20, 35), sg() * (3 + r() * 3), 0);
+      }
+    }
+    b.straight(55);
+  }
+
+  function World(opts) {
+    var w = { job: opts.job || null, earned: 0, trips: 0, visited: [], clock: 0, order: null, flash: null, damage: 0 };
+    var carId = w.job === 'taxi' ? 'taxi' : null;
+    var from = opts.start || 'hm_eki', to = null, road = null, exits = [];
+
+    function exitsOf(node, came) {
+      var ex = R.neighbors(node).filter(function (e) { return e.to !== came; });
+      if (!ex.length) ex = R.neighbors(node);
+      var B = R.NODES[node], A = R.NODES[came] || { x: B.x - 0.05, y: B.y };
+      var vx = B.x - A.x, vy = B.y - A.y;
+      ex.forEach(function (e) { var E = R.NODES[e.to], ux = E.x - B.x, uy = E.y - B.y; e.ang = Math.atan2(vx * uy - vy * ux, vx * ux + vy * uy); });
+      ex.sort(function (a, b) { return a.ang - b.ang; });
+      return ex.slice(0, 3);
+    }
+    function dirWords(n) { return n === 1 ? [L('まっすぐ', 'ahead')] : n === 2 ? [L('左', 'left'), L('右', 'right')] : [L('左', 'left'), L('まっすぐ', 'ahead'), L('右', 'right')]; }
+    function labels(ex) {
+      var nm = ex.map(function (e) { return t(R.NODES[e.to].name); });
+      if (nm.length === 1) return ['↑ ' + nm[0]];
+      if (nm.length === 2) return ['← ' + nm[0], nm[1] + ' →'];
+      return ['← ' + nm[0], '↑ ' + nm[1], nm[2] + ' →'];
+    }
+    function spec() {
+      var kind = R.ROAD_KINDS[road.kind], rev = road.a !== from;
+      var water = kind.water ? (rev ? (kind.water === 'left' ? 'right' : 'left') : kind.water) : null;
+      return {
+        id: 'w-' + road.a + '-' + road.b + (rev ? '-r' : ''), name: road.name, pal: kind.pal, deco: kind.deco, weather: 'clear',
+        night: !!kind.night, skyline: !!kind.skyline, water: water, noFinish: true, rails: road.kind === 'mount' || road.kind === 'hwymount',
+        banner: t(road.name) + '  →  ' + t(R.NODES[to].name), fork: labels(exits),
+        startMark: R.NODES[from].mark, endMark: R.NODES[to].mark,
+        build: function (b) { worldBuild(b, road, hash(road.a + road.b + (rev ? 'r' : ''))); }
+      };
+    }
+    function cfgFor(start) {
+      exits = exitsOf(to, from);
+      var s = R.load();
+      return {
+        track: spec(), mode: 'world', laps: Infinity, weather: 'clear', field: [],
+        traffic: road.traffic !== undefined ? road.traffic : (R.ROAD_KINDS[road.kind].traffic || 2),
+        car: playerCar(s, carId), levelMul: 1, exits: exits.length, start: start,
+        hud: hud, onTick: tick, drawMap: drawMap
+      };
+    }
+    function go(a, b, rd) { from = a; to = b; road = rd; }
+
+    function newOrder(at) {
+      var nodes = Object.keys(R.NODES).filter(function (n) { return n !== at; });
+      if (w.job === 'food') nodes = nodes.filter(function (n) { return R.route(at, n).path.length <= 3; });
+      var dest = pick(nodes), rt = R.route(at, dest);
+      var f = { taxi: 0.6, delivery: 0.52, food: 0.72 }[w.job];
+      var time = Math.round(rt.len * R.SEG / (R.MAX * f) + 12);
+      var fare = Math.round((({ taxi: 300, delivery: 250, food: 400 })[w.job] + rt.len * 0.5) / 10) * 10;
+      var who = w.job === 'taxi' ? t(pick(R.PASSENGERS)) : w.job === 'food' ? L('うなぎ弁当', 'eel lunch box') : null;
+      var parcel = w.job === 'delivery' ? pick(R.PARCELS) : null;
+      w.order = { dest: dest, time: time, left: time, fare: fare, who: who || t(parcel), fragile: parcel && parcel.fragile, dmg0: w.damage };
+      w.flash = { text: w.job === 'taxi' ? L('お客さん（' + w.order.who + '）「' + t(R.NODES[dest].name) + 'まで」', 'Fare (' + w.order.who + '): "' + t(R.NODES[dest].name) + ', please"')
+                                         : L(w.order.who + ' を ' + t(R.NODES[dest].name) + ' へ', 'Deliver ' + w.order.who + ' to ' + t(R.NODES[dest].name)), t: 5 };
+    }
+    function arrive(node) {
+      if (w.visited.indexOf(node) < 0) w.visited.push(node);
+      var first = R.edit(function (s) { if (s.visited[node]) return false; s.visited[node] = true; if (!w.job) s.money += 300; return true; });
+      if (first && !w.job) { w.earned += 300; w.flash = { text: L('初めて訪れた！ ' + t(R.NODES[node].name) + '  +300 円', 'First visit! ' + t(R.NODES[node].name) + ' +300'), t: 4 }; sfx('coin'); }
+      else if (!w.job) w.flash = { text: t(R.NODES[node].name), t: 3 };
+      if (w.order && node === w.order.dest) {
+        var o = w.order, late = o.left <= 0;
+        var base = o.fare * (late ? 0.5 : 1), tip = late ? 0 : o.fare * 0.5 * (o.left / o.time);
+        var pen = Math.max(0, w.damage - o.dmg0) * o.fare * (o.fragile ? 1.2 : 0.5);
+        var pay = Math.max(50, Math.round((base + tip - pen) / 10) * 10);
+        w.earned += pay; w.trips++;
+        R.edit(function (s) {
+          s.money += pay; s.stats.jobs = (s.stats.jobs || 0) + 1; s.stats.earned = (s.stats.earned || 0) + pay;
+          if (w.job === 'taxi' && s.owned.indexOf('taxi') < 0) s.owned.push('taxi');
+        });
+        w.flash = { text: (late ? L('遅刻… ', 'Late... ') : L('到着！ ', 'Arrived! ')) + '+' + yen(pay) + (tip > 0 ? L('（チップ込み）', ' (incl. tip)') : ''), t: 4 };
+        sfx(late ? 'bad' : 'win');
+        w.damage = 0;
+        newOrder(node);
+        return true;   // 修理して次へ
+      }
+      return false;
+    }
+    function tick(dt, info) {
+      w.clock += dt; w.damage = info.damage;
+      if (w.order) w.order.left -= dt;
+      if (w.flash) { w.flash.t -= dt; if (w.flash.t <= 0) w.flash = null; }
+    }
+    function nav() {
+      if (!w.order) return null;
+      if (to === w.order.dest) return L('まもなく到着！', 'Arriving soon!');
+      var rt = R.route(to, w.order.dest), nx = rt.path[1];
+      var i = exits.findIndex(function (e) { return e.to === nx; });
+      if (i < 0) return L('次の分岐はどこでも（遠回り）', 'Any exit (detour)');
+      return L('次の分岐: ', 'Next fork: ') + dirWords(exits.length)[i] + '（' + t(R.NODES[nx].name) + '）';
+    }
+    function hud() {
+      var lines = [];
+      if (w.job) {
+        var o = w.order;
+        lines.push({ t: L('行き先: ', 'To: ') + t(R.NODES[o.dest].name) + '（' + o.who + '）' });
+        lines.push({ t: (o.left > 0 ? L('残り ', 'Time ') + Math.ceil(o.left) + L(' 秒', 's') : L('遅刻中', 'LATE')) + L('　報酬 ', '  pay ') + yen(o.fare), c: o.left < 15 ? '#ff8a80' : '#e8e8f0' });
+        lines.push({ t: nav(), c: '#5ccfa0' });
+      } else {
+        lines.push({ t: '→ ' + t(R.NODES[to].name) });
+        lines.push({ t: L('分岐: ', 'Fork: ') + labels(exits).join('  '), c: '#9fe8c8' });
+      }
+      if (w.flash) lines.push({ t: w.flash.text, c: '#ffd93d' });
+      var title = w.job ? R.JOBS[w.job].icon + ' ' + t(R.JOBS[w.job].name) + L('　稼ぎ ', '  earned ') + yen(w.earned) : '🗺 ' + t(road.name);
+      return { title: title, lines: lines };
+    }
+    function drawMap(g, x, y, size, frac) {
+      function P(n) { var N = R.NODES[n]; return [x + 6 + N.x * (size - 12), y + 6 + N.y * (size - 12)]; }
+      R.ROADS.forEach(function (r) {
+        var a = P(r.a), b = P(r.b), cur = r === road;
+        g.strokeStyle = cur ? '#ffd93d' : (r.kind === 'hwy' || r.kind === 'hwymount') ? 'rgba(77,208,225,.8)' : 'rgba(255,255,255,.45)';
+        g.lineWidth = cur ? 2.5 : (r.kind === 'hwy' || r.kind === 'hwymount') ? 2 : 1;
+        g.beginPath(); g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); g.stroke();
+      });
+      g.lineWidth = 1;
+      Object.keys(R.NODES).forEach(function (n) {
+        var p = P(n), dest = w.order && w.order.dest === n;
+        g.fillStyle = dest ? (Math.floor(w.clock * 3) % 2 ? '#ff5252' : '#ffd93d') : '#cfd8dc';
+        g.beginPath(); g.arc(p[0], p[1], dest ? 3.5 : 2, 0, Math.PI * 2); g.fill();
+      });
+      var a = P(from), b = P(to);
+      g.fillStyle = '#5ccfa0'; g.beginPath(); g.arc(a[0] + (b[0] - a[0]) * frac, a[1] + (b[1] - a[1]) * frac, 3.5, 0, Math.PI * 2); g.fill();
+    }
+
+    w.first = function () {
+      var nb = R.neighbors(from);
+      if (w.job) newOrder(from);
+      var pickE = nb[0];
+      if (w.order) { var rt = R.route(from, w.order.dest); pickE = nb.filter(function (e) { return e.to === rt.path[1]; })[0] || nb[0]; }
+      if (w.visited.indexOf(from) < 0) w.visited.push(from);
+      go(from, pickE.to, pickE.road);
+      return cfgFor(null);
+    };
+    w.next = function (carry) {
+      if (carry.reverse) {
+        go(to, from, road);
+        return cfgFor({ speed: 0, x: carry.x, nitro: carry.nitro, damage: carry.damage, frac: 1 - carry.frac });
+      }
+      var fixed = arrive(to);
+      var ex = exits[carry.choice] || exits[0];
+      go(to, ex.to, ex.road);
+      return cfgFor({ speed: carry.speed, x: carry.x, nitro: carry.nitro, damage: fixed ? 0 : carry.damage, total: 0 });
+    };
+    w.summary = function () {
+      var out = [];
+      if (w.job) out.push(L('完了 ', 'Jobs done ') + w.trips + L(' 件　稼ぎ ', '  earned ') + yen(w.earned));
+      else out.push(L('訪れた場所 ', 'Places visited ') + w.visited.map(function (n) { return t(R.NODES[n].name); }).join('・'));
+      if (!w.job && w.earned) out.push(L('初訪問ボーナス +', 'First-visit bonus +') + yen(w.earned));
+      out.push(L('走行時間 ', 'Drive time ') + fmt(w.clock * 1000));
+      return out;
+    };
+    w.here = function () { return { from: from, to: to }; };
+    return w;
+  }
+
+  /* =====================================================================
+     GUI 版（1 つのウィンドウの中で遊ぶ）
+     ===================================================================== */
+
+  var App = null;
+
+  function openApp(route) {
+    if (App && !App.closed) { App.win.focus(); if (route) App.route(route); return; }
+    App = createApp();
+    App.route(route || 'title');
+  }
+
+  function createApp() {
+    var app = { closed: false, stack: [], sel: 0, sess: null, demo: null, mode: 'menu', cmd: '', keyHook: null, runOpts: null, paused: false };
+    var win = TB.Win.open({ title: 'TUI RACING', width: 960, maximized: true, bodyClass: 'rx-body',
+                            onClose: function () { cleanup(); }, toTui: function () { toTui(); } });
+    app.win = win;
+    var stage = el('div', 'rx-stage'), cv = el('canvas', 'rx-canvas'), over = el('div', 'rx-over'), padBox = el('div', 'rx-padbox');
+    stage.appendChild(cv); stage.appendChild(over);
+    win.body.appendChild(stage); win.body.appendChild(padBox);
+    var g = cv.getContext('2d');
+    function portrait() { return window.innerHeight > window.innerWidth * 1.1; }
+    function sizeCanvas() {
+      var p = portrait();
+      cv.width = p ? 540 : 960; cv.height = p ? 900 : 540;
+    }
+    sizeCanvas();
+
+    function startDemo() {
+      var ids = loopTracks();
+      var id = ids[Math.floor(Math.random() * ids.length)];
+      app.demo = R.Session({ track: id, weather: R.TRACKS[id].weather, demo: true, laps: Infinity, field: R.makeField(6, 0.95), traffic: R.TRACKS[id].traffic || 0,
+                             car: playerCar(R.load()) });
+      app.demo.W = cv.width; app.demo.H = cv.height;
+      app.demoT = 0;
+    }
+    startDemo();
+
+    var last = null, raf = 0;
+    function frame(now) {
+      if (app.closed) return;
+      if (last === null) last = now;
+      var dt = Math.min(0.05, (now - last) / 1000);
+      last = now;
+      if (app.sess) {
+        if (!app.paused) for (var st = 0; st < (R.speedup || 1) && app.sess; st++) app.sess.update(dt);
+        app.sess.render(g);
+      } else if (app.demo) {
+        app.demo.update(dt); app.demo.render(g);
+        app.demoT += dt;
+        if (app.demoT > 40) startDemo();
+      }
+      raf = requestAnimationFrame(frame);
+    }
+    raf = requestAnimationFrame(frame);
+
+    /* --- キー --- */
+    function onKey(k) {
+      if (app.keyHook && app.keyHook(k) !== false) return;
+      if (app.mode === 'race' && app.sess) {
+        if (k === 'Escape' || k === 'p' || k === 'P') { pause(); return; }
+        if (k === 'm' || k === 'M') { toTui(); return; }
+        app.sess.key(k, true);
+        return;
+      }
+      if (k === 'm' || k === 'M') { toTui(); return; }
+      var f = focusables();
+      if (!f.length) { if (k === 'Escape' || k === 'Backspace') back(); return; }
+      var cur = f[app.sel] || f[0];
+      var cols = parseInt((cur.closest('[data-cols]') || { getAttribute: function () { return '1'; } }).getAttribute('data-cols'), 10) || 1;
+      if (k === 'ArrowDown' || k === 's' || k === 'j') move(cols);
+      else if (k === 'ArrowUp' || k === 'w' || k === 'k') move(-cols);
+      else if (k === 'ArrowLeft' || k === 'a' || k === 'h') { if (cur._lr) { cur._lr(-1); sfx('click'); } else move(-1); }
+      else if (k === 'ArrowRight' || k === 'd' || k === 'l') { if (cur._lr) { cur._lr(1); sfx('click'); } else move(1); }
+      else if (k === 'Enter' || k === ' ') { cur.click(); }
+      else if (k === 'Escape' || k === 'Backspace' || k === 'q') back();
+    }
+    function onKeyUp(k) { if (app.mode === 'race' && app.sess) app.sess.key(k, false); }
+    TB.Term.capture(onKey, onKeyUp);
+
+    function focusables() { return Array.prototype.slice.call(over.querySelectorAll('.rx-f:not(.dis)')); }
+    function move(d) {
+      var f = focusables(); if (!f.length) return;
+      app.sel = clamp(app.sel + d, 0, f.length - 1);
+      highlight(); sfx('click');
+    }
+    function highlight() {
+      var f = focusables();
+      f.forEach(function (x, i) { x.classList.toggle('on', i === app.sel); });
+      var cur = f[app.sel];
+      if (cur) { cur.scrollIntoView({ block: 'nearest' }); if (cur._focus) cur._focus(); }
+    }
+
+    /* --- 画面の切り替え --- */
+    function show(screen, keepSel) {
+      over.classList.remove('hidden');
+      over.innerHTML = '';
+      app.keyHook = null;
+      screen.build(over);
+      if (!keepSel) app.sel = screen.sel || 0;
+      var f = focusables();
+      f.forEach(function (x, i) {
+        x.addEventListener('mouseenter', function () { app.sel = i; highlight(); });
+      });
+      app.sel = clamp(app.sel, 0, Math.max(0, f.length - 1));
+      highlight();
+    }
+    function go(screen) { if (app.stack.length) app.stack[app.stack.length - 1].sel = app.sel; app.stack.push(screen); show(screen); }
+    function replace(screen) { app.stack.pop(); app.stack.push(screen); show(screen); }
+    function back() {
+      if (app.stack.length <= 1) { win.close(); return; }
+      app.stack.pop(); sfx('click');
+      var top = app.stack[app.stack.length - 1];
+      show(top, false);
+    }
+    function home() { app.stack = app.stack.slice(0, 1); show(app.stack[0]); }
+    function refresh() { show(app.stack[app.stack.length - 1], true); }
+    app.go = go; app.back = back;
+
+    /* --- 部品 --- */
+    function panel(title, sub) {
+      var p = el('div', 'rx-panel');
+      var h = el('div', 'rx-h'); h.appendChild(el('span', 'rx-h-t', title));
+      if (sub) h.appendChild(el('span', 'rx-h-s', sub));
+      var money = el('span', 'rx-money', yen(R.load().money));
+      h.appendChild(money);
+      p.appendChild(h);
+      return p;
+    }
+    function item(label, sub, on, opt) {
+      opt = opt || {};
+      var b = el('button', 'rx-item rx-f' + (opt.dis ? ' dis' : '') + (opt.cls ? ' ' + opt.cls : ''));
+      b.type = 'button';
+      if (opt.icon) b.appendChild(el('span', 'rx-ic', opt.icon));
+      var tx = el('span', 'rx-tx');
+      tx.appendChild(el('span', 'rx-l', label));
+      if (sub) tx.appendChild(el('span', 'rx-s', sub));
+      b.appendChild(tx);
+      if (opt.right) b.appendChild(el('span', 'rx-r', opt.right));
+      b.addEventListener('click', function (e) { e.preventDefault(); if (opt.dis) { sfx('bad'); return; } sfx('click'); on(); });
+      if (opt.focus) b._focus = opt.focus;
+      return b;
+    }
+    function list(items, cols) {
+      var d = el('div', 'rx-list' + (cols > 1 ? ' grid' : ''));
+      if (cols > 1) { d.setAttribute('data-cols', String(cols)); d.style.gridTemplateColumns = 'repeat(' + cols + ', minmax(0, 1fr))'; }
+      items.forEach(function (x) { d.appendChild(x); });
+      return d;
+    }
+    function optRow(label, get, change) {
+      var b = el('button', 'rx-item rx-opt rx-f');
+      b.type = 'button';
+      var l = el('span', 'rx-l', label), v = el('span', 'rx-v');
+      function upd() { v.textContent = '◀ ' + get() + ' ▶'; }
+      b.appendChild(l); b.appendChild(v); upd();
+      b._lr = function (d) { change(d); upd(); };
+      b.addEventListener('click', function (e) {
+        var r = b.getBoundingClientRect();
+        b._lr(e.clientX && e.clientX < r.left + r.width * 0.6 ? -1 : 1); sfx('click');
+      });
+      return b;
+    }
+    function hint(text) { return el('div', 'rx-hint', text || L('↑↓←→ 選ぶ　Enter 決定　Esc 戻る　m 文字版へ', '↑↓←→ select  Enter confirm  Esc back  m text mode')); }
+    function preview(track, w, h, weather, mirror) {
+      var c = el('canvas', 'rx-prev'); c.width = w || 320; c.height = h || 180;
+      try { R.drawPreview(c, track, weather, mirror); } catch (e) { /* ignore */ }
+      return c;
+    }
+    function statBars(stats) {
+      var d = el('div', 'rx-stats');
+      [['spd', L('最高速', 'Speed')], ['acc', L('加速', 'Accel')], ['grp', L('グリップ', 'Grip')], ['arm', L('頑丈さ', 'Armor')], ['nit', L('ニトロ', 'Nitro')]].forEach(function (p) {
+        var row = el('div', 'rx-stat');
+        row.appendChild(el('span', 'rx-stat-l', p[1]));
+        var bar = el('span', 'rx-bar'), fill = el('span', 'rx-fill');
+        fill.style.width = clamp(stats[p[0]] / 12 * 100, 2, 100) + '%';
+        bar.appendChild(fill); row.appendChild(bar);
+        row.appendChild(el('span', 'rx-stat-v', stats[p[0]].toFixed(1)));
+        d.appendChild(row);
+      });
+      return d;
+    }
+
+    /* =================== 各画面 =================== */
+
+    var SCREENS = {};
+
+    SCREENS.title = function () {
+      return { build: function (o) {
+        var s = R.load();
+        var box = el('div', 'rx-title');
+        box.appendChild(el('div', 'rx-logo', 'TUI RACING'));
+        box.appendChild(el('div', 'rx-tag', L('ターミナル発・本格レーシング ── 峠からサーキット、浜松から名古屋まで', 'From terminal to tarmac — mountain passes, circuits, Hamamatsu to Nagoya')));
+        box.appendChild(el('div', 'rx-carline', L('愛車 ', 'Car ') + t(R.car(s.car).name) + '　·　' + yen(s.money) + '　·　' + L('難易度 ', 'Level ') + t(R.LEVEL_NAMES[s.level])));
+        var done = Math.min(s.story, R.STORY.length);
+        var items = [
+          item(L('ストーリー', 'Story'), done + ' / ' + R.STORY.length, function () { go(SCREENS.story()); }, { icon: '📖' }),
+          item(L('オープンワールド', 'Open World'), L('浜松・東名・名古屋', 'Hamamatsu–Nagoya'), function () { go(SCREENS.world(null)); }, { icon: '🗾' }),
+          item(L('アルバイト', 'Part-time Jobs'), L('タクシー・宅配・出前', 'Taxi, parcels, food'), function () { go(SCREENS.jobs()); }, { icon: '🚕' }),
+          item(L('グランプリ', 'Grand Prix'), L('カップ戦', 'Cups'), function () { go(SCREENS.gp()); }, { icon: '🏆' }),
+          item(L('クイックレース', 'Quick Race'), L('コース・天気を選ぶ', 'Pick track & weather'), function () { go(SCREENS.quick()); }, { icon: '🏁' }),
+          item(L('峠バトル', 'Touge Battle'), L('ダウンヒル 1 対 1', 'Downhill 1v1'), function () { go(SCREENS.touge()); }, { icon: '⛰' }),
+          item(L('タイムアタック', 'Time Attack'), L('ゴーストと勝負', 'Beat your ghost'), function () { go(SCREENS.trackPick('time')); }, { icon: '⏱' }),
+          item(L('チャレンジ', 'Challenges'), L('脱落戦・追跡など', 'Elimination, chase…'), function () { go(SCREENS.challenges()); }, { icon: '🔥' }),
+          item(L('ミニゲーム', 'Mini Games'), L('ジムカーナ・ゼロヨン', 'Gymkhana, drag'), function () { go(SCREENS.minis()); }, { icon: '🎯' }),
+          item(L('カジュアル', 'Casual'), L('コイン・加速パネルあり', 'Coins & boost pads'), function () { go(SCREENS.casual()); }, { icon: '🎈' }),
+          item(L('ガレージ', 'Garage'), s.owned.length + L(' 台所有', ' owned'), function () { go(SCREENS.garage()); }, { icon: '🔧' }),
+          item(L('記録', 'Records'), '', function () { go(SCREENS.records()); }, { icon: '📊' }),
+          item(L('設定・遊び方', 'Settings & Help'), '', function () { go(SCREENS.settings()); }, { icon: '⚙' }),
+          item(L('文字版（TUI）で遊ぶ', 'Play in text mode'), 'm', function () { toTui(); }, { icon: '⌨' })
+        ];
+        box.appendChild(list(items, 2));
+        box.appendChild(hint());
+        o.appendChild(box);
+      } };
+    };
+
+    /* ---------- ストーリー ---------- */
+    SCREENS.story = function () {
+      return { build: function (o) {
+        var s = R.load();
+        var p = panel(L('ストーリー', 'Story'), L('クリア ', 'Cleared ') + Math.min(s.story, R.STORY.length) + ' / ' + R.STORY.length);
+        var items = [], firstOpen = 0;
+        R.CHAPTERS.forEach(function (ch) {
+          var evs = R.STORY.filter(function (e) { return e.ch === ch.id; });
+          if (!evs.length) return;
+          items.push(el('div', 'rx-sec', t(ch.name)));
+          evs.forEach(function (ev) {
+            var idx = R.STORY.indexOf(ev), locked = idx > s.story, cleared = idx < s.story;
+            if (idx === s.story) firstOpen = items.filter(function (x) { return x.classList.contains('rx-f'); }).length;
+            items.push(item((cleared ? '✔ ' : locked ? '🔒 ' : '▶ ') + t(ev.title),
+                            trackName(ev.track) + '　' + t((R.MODES[ev.mode] || R.MODES.race).name) + '　' + goalText(ev.goal, ev.track),
+                            function () { storyEvent(idx, true); }, { dis: locked, right: yen(ev.reward) }));
+          });
+        });
+        p.appendChild(list(items));
+        p.appendChild(hint());
+        o.appendChild(p);
+        this.sel = firstOpen;
+      }, sel: 0 };
+    };
+
+    function storyEvent(idx, withScene) {
+      var ev = R.STORY[idx];
+      function brief() { go(SCREENS.brief(idx)); }
+      if (withScene && ev.scene) scene(ev.scene, brief); else brief();
+    }
+
+    SCREENS.brief = function (idx) {
+      var ev = R.STORY[idx];
+      return { build: function (o) {
+        var s = R.load();
+        var p = panel(t(ev.title), t(R.CHAPTERS.filter(function (c) { return c.id === ev.ch; })[0].name));
+        var row = el('div', 'rx-row');
+        row.appendChild(preview(ev.track, 400, 225));
+        var info = el('div', 'rx-info');
+        [[L('コース', 'Track'), trackName(ev.track)], [L('種目', 'Mode'), t((R.MODES[ev.mode] || R.MODES.race).name)],
+         [L('目標', 'Goal'), goalText(ev.goal, ev.track)], [L('報酬', 'Reward'), yen(ev.reward) + (idx < s.story ? L('（再挑戦は 3 割）', ' (30% on replay)') : '')],
+         [L('車', 'Car'), ev.car ? t(R.car(ev.car).name) + L('（指定）', ' (fixed)') : t(R.car(s.car).name)]].forEach(function (kv) {
+          var d = el('div', 'rx-kv'); d.appendChild(el('span', 'rx-k', kv[0])); d.appendChild(el('span', 'rx-vv', kv[1])); info.appendChild(d);
+        });
+        if (ev.boss) info.appendChild(el('div', 'rx-boss', 'BOSS: ' + R.BOSSES[ev.boss].name));
+        row.appendChild(info);
+        p.appendChild(row);
+        p.appendChild(list([
+          item(L('スタート', 'Start'), '', function () { runStory(idx); }, { icon: '🏁', cls: 'accent' }),
+          item(L('会話をもう一度', 'Replay scene'), '', function () { if (ev.scene) scene(ev.scene, function () { refresh(); }); }, { icon: '💬', dis: !ev.scene }),
+          item(L('ガレージ', 'Garage'), '', function () { go(SCREENS.garage()); }, { icon: '🔧', dis: !!ev.car }),
+          item(L('戻る', 'Back'), '', function () { back(); }, { icon: '↩' })
+        ], 2));
+        p.appendChild(hint());
+        o.appendChild(p);
+      } };
+    };
+
+    function runStory(idx) {
+      var ev = R.STORY[idx];
+      app.cmd = 'story ' + ev.id;
+      run({
+        make: function () { return storyCfg(ev); },
+        onResult: function (r) { return applyResult({ kind: 'story', ev: ev, track: ev.track }, r); },
+        buttons: function (sum) {
+          if (sum.success) return [{ label: L('次へ', 'Continue'), on: function () {
+            var after = function () {
+              if (ev.id === '5b') { credits(); return; }
+              var nx = idx + 1;
+              app.stack = app.stack.slice(0, 2);   // タイトル・ストーリー一覧まで戻す
+              if (nx < R.STORY.length) { show(app.stack[1]); storyEvent(nx, true); } else show(app.stack[1]);
+            };
+            if (ev.post) scene(ev.post, after); else after();
+          } }, { label: L('ストーリー一覧', 'Story list'), on: function () { app.stack = app.stack.slice(0, 2); show(app.stack[1]); } }];
+          return [{ label: L('リトライ', 'Retry'), on: function () { runStory(idx); } },
+                  { label: L('作戦を練る（戻る）', 'Back to briefing'), on: function () { refresh(); } }];
+        }
+      });
+    }
+
+    function scene(lines, done) {
+      over.classList.remove('hidden');
+      over.innerHTML = '';
+      var box = el('div', 'rx-scene');
+      var face = el('canvas', 'rx-face'); face.width = 96; face.height = 96;
+      var right = el('div', 'rx-say');
+      var name = el('div', 'rx-name'), text = el('div', 'rx-text'), more = el('div', 'rx-more', '▼ Enter / クリック　s スキップ');
+      right.appendChild(name); right.appendChild(text); right.appendChild(more);
+      box.appendChild(face); box.appendChild(right);
+      over.appendChild(box);
+      var i = 0, shown = 0, timer = 0, full = '';
+      function showLine() {
+        if (i >= lines.length) { clearInterval(timer); app.keyHook = null; done(); return; }
+        var ln = lines[i], ch = R.CHARS[ln.who];
+        R.drawPortrait(face, ch.face);
+        name.textContent = t(ch.name); name.style.color = ch.color;
+        full = t(ln.text); shown = 0; text.textContent = '';
+        clearInterval(timer);
+        timer = setInterval(function () {
+          shown += 2; text.textContent = full.slice(0, shown);
+          if (shown % 6 === 0) sfx('step');
+          if (shown >= full.length) clearInterval(timer);
+        }, 28);
+      }
+      function adv() {
+        if (shown < full.length) { shown = full.length; text.textContent = full; clearInterval(timer); return; }
+        i++; showLine();
+      }
+      box.addEventListener('click', adv);
+      app.keyHook = function (k) {
+        if (k === 'Enter' || k === ' ') adv();
+        else if (k === 's' || k === 'S' || k === 'Escape') { i = lines.length; clearInterval(timer); app.keyHook = null; done(); }
+        return true;
+      };
+      showLine();
+    }
+
+    function credits() {
+      over.innerHTML = '';
+      var box = el('div', 'rx-credits');
+      ['THE END', '', 'TUI RACING', L('ストーリー完結！', 'Story complete!'), '',
+       L('番外編「峠の走り屋たち」が開放されました', 'Extra chapter "Legends of the Pass" unlocked'), L('プロトタイプ ZERO がガレージに届きました', 'Prototype ZERO is in your garage'),
+       '', 'Thank you for playing.'].forEach(function (ln, i) { box.appendChild(el('div', i === 0 ? 'rx-end' : '', ln)); });
+      over.appendChild(box);
+      sfx('win');
+      app.keyHook = function () { app.keyHook = null; app.stack = app.stack.slice(0, 2); show(app.stack[1]); return true; };
+      box.addEventListener('click', function () { app.keyHook(); });
+    }
+
+    /* ---------- オープンワールド・アルバイト ---------- */
+    SCREENS.world = function (job) {
+      var start = 'hm_eki';
+      return { build: function (o) {
+        var p = panel(job ? R.JOBS[job].icon + ' ' + t(R.JOBS[job].name) : L('オープンワールド', 'Open World'),
+                      job ? t(R.JOBS[job].desc) : L('浜松市〜東名・新東名〜名古屋市を自由に走る', 'Roam from Hamamatsu via the expressways to Nagoya'));
+        var row = el('div', 'rx-row');
+        var mc = el('canvas', 'rx-map'); mc.width = 520; mc.height = 320;
+        function drawBig() {
+          var g2 = mc.getContext('2d');
+          g2.fillStyle = '#0b1522'; g2.fillRect(0, 0, mc.width, mc.height);
+          g2.fillStyle = 'rgba(47,127,193,.35)'; g2.fillRect(0, mc.height * 0.72, mc.width, mc.height * 0.28);
+          g2.font = 'bold 13px sans-serif'; g2.fillStyle = 'rgba(255,255,255,.25)';
+          g2.fillText(L('浜松市', 'Hamamatsu'), 40, 40); g2.fillText(L('名古屋市', 'Nagoya'), mc.width - 110, 40); g2.fillText(L('遠州灘・伊勢湾', 'Pacific coast'), mc.width / 2 - 50, mc.height - 16);
+          function P(n) { var N = R.NODES[n]; return [20 + N.x * (mc.width - 40), 20 + N.y * (mc.height - 40)]; }
+          R.ROADS.forEach(function (r) {
+            var a = P(r.a), b = P(r.b), hw = r.kind === 'hwy' || r.kind === 'hwymount';
+            g2.strokeStyle = hw ? '#4dd0e1' : '#8a9aab'; g2.lineWidth = hw ? 3 : 1.5;
+            g2.beginPath(); g2.moveTo(a[0], a[1]); g2.lineTo(b[0], b[1]); g2.stroke();
+            if (hw) { g2.fillStyle = '#4dd0e1'; g2.font = '11px sans-serif'; g2.fillText(t(r.name), (a[0] + b[0]) / 2 - 24, (a[1] + b[1]) / 2 - 5); }
+          });
+          Object.keys(R.NODES).forEach(function (n) {
+            var p2 = P(n), on = n === start;
+            g2.fillStyle = on ? '#5ccfa0' : '#eceff1'; g2.beginPath(); g2.arc(p2[0], p2[1], on ? 7 : 4, 0, Math.PI * 2); g2.fill();
+            g2.fillStyle = on ? '#5ccfa0' : '#cfd8dc'; g2.font = (on ? 'bold ' : '') + '11px sans-serif'; g2.fillText(t(R.NODES[n].name), p2[0] + 8, p2[1] + 4);
+          });
+        }
+        drawBig();
+        mc.addEventListener('click', function (e) {
+          var r = mc.getBoundingClientRect(), mx = (e.clientX - r.left) / r.width * mc.width, my = (e.clientY - r.top) / r.height * mc.height;
+          Object.keys(R.NODES).forEach(function (n) { var N = R.NODES[n], px = 20 + N.x * (mc.width - 40), py = 20 + N.y * (mc.height - 40); if (Math.hypot(px - mx, py - my) < 14) { start = n; drawBig(); } });
+        });
+        row.appendChild(mc);
+        var info = el('div', 'rx-info');
+        info.appendChild(el('div', 'rx-s', L('道の終わりの分岐では、走っている車線（左・中央・右）で行き先を選びます。標識を見て寄せておきましょう。止まって r で U ターン。',
+                                               'At the end of each road, the lane you are in (left/centre/right) picks the exit. Stop and press r to U-turn.')));
+        if (job === 'taxi') info.appendChild(el('div', 'rx-s', L('タクシーの車で走ります。', 'You drive the company taxi.')));
+        info.appendChild(optRow(L('出発地', 'Start'), function () { return t(R.NODES[start].name); }, function (d) {
+          var ks = Object.keys(R.NODES); start = ks[(ks.indexOf(start) + d + ks.length) % ks.length]; drawBig();
+        }));
+        info.appendChild(item(L('出発する', 'Go'), '', function () { runWorld(job, start); }, { icon: '🚗', cls: 'accent' }));
+        info.appendChild(item(L('戻る', 'Back'), '', function () { back(); }, { icon: '↩' }));
+        row.appendChild(info);
+        p.appendChild(row);
+        p.appendChild(hint());
+        o.appendChild(p);
+      } };
+    };
+
+    SCREENS.jobs = function () {
+      return { build: function (o) {
+        var s = R.load();
+        var p = panel(L('アルバイト', 'Part-time Jobs'), L('完了 ', 'Done ') + (s.stats.jobs || 0) + L(' 件　累計 ', '  total ') + yen(s.stats.earned || 0));
+        p.appendChild(list(Object.keys(R.JOBS).map(function (k) {
+          var j = R.JOBS[k];
+          return item(t(j.name), t(j.desc), function () { go(SCREENS.world(k)); }, { icon: j.icon });
+        }).concat([item(L('戻る', 'Back'), '', back, { icon: '↩' })])));
+        p.appendChild(hint());
+        o.appendChild(p);
+      } };
+    };
+
+    function runWorld(job, start) {
+      var w = World({ job: job, start: start });
+      app.cmd = job ? 'job ' + job + ' ' + start : 'world ' + start;
+      run({ make: function () { return w.first(); }, chain: w.next, world: w });
+    }
+
+    /* ---------- グランプリ ---------- */
+    SCREENS.gp = function () {
+      return { build: function (o) {
+        var s = R.load();
+        var p = panel(L('グランプリ', 'Grand Prix'), L('上位 3 位でメダル。次のカップが開きます', 'Top 3 wins a medal and unlocks the next cup'));
+        p.appendChild(list(R.CUPS.map(function (c) {
+          var un = R.cupUnlocked(s, c), m = s.cups[c.id];
+          return item(t(c.name), c.tracks.map(trackName).join(' / '), function () { go(SCREENS.cup(c.id)); },
+                      { icon: un ? '🏆' : '🔒', dis: !un, right: m ? '🏅' + t(R.MEDALS[m]) : '' });
+        }).concat([item(L('戻る', 'Back'), '', back, { icon: '↩' })])));
+        p.appendChild(hint());
+        o.appendChild(p);
+      } };
+    };
+    SCREENS.cup = function (cupId) {
+      var cup = R.CUPS.filter(function (c) { return c.id === cupId; })[0];
+      return { build: function (o) {
+        var p = panel(t(cup.name), L('全 ' + cup.tracks.length + ' 戦・ポイント制', cup.tracks.length + ' rounds, points'));
+        var row = el('div', 'rx-thumbs');
+        cup.tracks.forEach(function (id, i) {
+          var c = el('div', 'rx-thumb'); c.appendChild(preview(id, 200, 112)); c.appendChild(el('div', 'rx-s', (i + 1) + '. ' + trackName(id))); row.appendChild(c);
+        });
+        p.appendChild(row);
+        p.appendChild(el('div', 'rx-s', L('ポイント: ', 'Points: ') + R.POINTS.join('-') + L('　優勝ボーナス ', '  winner bonus ') + yen(cup.bonus[0])));
+        p.appendChild(list([item(L('開幕！', 'Start the cup'), '', function () { runCup(Cup(cupId)); }, { icon: '🏁', cls: 'accent' }),
+                            item(L('戻る', 'Back'), '', back, { icon: '↩' })], 2));
+        p.appendChild(hint());
+        o.appendChild(p);
+      } };
+    };
+    function runCup(st) {
+      app.cmd = 'gp ' + st.cup.id;
+      run({
+        make: st.cfg,
+        onResult: st.result,
+        buttons: function () {
+          var tbl = function () { return standingsLines(st); };
+          if (st.over()) return [{ label: L('最終結果へ', 'Final standings'), on: function () { cupEnd(st); } }];
+          return [{ label: L('次のレースへ（第 ' + (st.idx + 1) + ' 戦）', 'Next race (round ' + (st.idx + 1) + ')'), on: function () { runCup(st); } }];
+        },
+        extra: function () { return standingsLines(st); }
+      });
+    }
+    function standingsLines(st) {
+      return st.table().map(function (e, i) { return (i + 1) + '. ' + (e.n === 'YOU' ? L('あなた', 'YOU') : e.n) + '  ' + e.p + 'pt'; });
+    }
+    function cupEnd(st) {
+      var f = st.finish();
+      app.mode = 'menu'; app.sess = null;
+      over.classList.remove('hidden'); over.innerHTML = '';
+      var p = panel(t(st.cup.name) + L(' 最終結果', ' — final'), '');
+      p.appendChild(el('div', 'rx-big', f.pos === 1 ? '🏆 ' + L('総合優勝！', 'CHAMPION!') : f.pos <= 3 ? '🏅 ' + L('総合 ' + f.pos + ' 位', 'Overall P' + f.pos) : L('総合 ' + f.pos + ' 位', 'Overall P' + f.pos)));
+      var tb = el('div', 'rx-table');
+      st.table().forEach(function (e, i) { var d = el('div', 'rx-tr' + (e.n === 'YOU' ? ' me' : '')); d.appendChild(el('span', '', (i + 1) + '. ' + (e.n === 'YOU' ? L('あなた', 'YOU') : e.n))); d.appendChild(el('span', '', e.p + ' pt')); tb.appendChild(d); });
+      p.appendChild(tb);
+      if (f.bonus) p.appendChild(el('div', 'rx-s', L('ボーナス +', 'Bonus +') + yen(f.bonus)));
+      p.appendChild(list([item(L('グランプリへ', 'Back to Grand Prix'), '', function () { app.stack = app.stack.slice(0, 2); show(app.stack[1]); }, { icon: '↩' })]));
+      o_focus();
+      function o_focus() { over.appendChild(p); app.sel = 0; highlight(); }
+      if (f.pos === 1) sfx('win');
+    }
+
+    /* ---------- クイックレース ---------- */
+    var quickOpt = { track: 'coast', laps: 2, level: null, weather: 'auto', mirror: false, rivals: 7 };
+    SCREENS.quick = function (casual) {
+      var tracks = R.ALL_TRACKS;
+      return { build: function (o) {
+        var s = R.load();
+        if (!quickOpt.level) quickOpt.level = s.level;
+        var p = panel(casual ? L('パーティレース', 'Party Race') : L('クイックレース', 'Quick Race'), casual ? t(R.CASUAL.party.desc) : L('コース・周回・天気を選んで走る', 'Choose track, laps and weather'));
+        var row = el('div', 'rx-row');
+        var pv = el('div', 'rx-pv');
+        function drawPv() { pv.innerHTML = ''; pv.appendChild(preview(quickOpt.track, 400, 225, quickOpt.weather === 'auto' ? null : quickOpt.weather, quickOpt.mirror)); pv.appendChild(el('div', 'rx-s', t(R.TRACKS[quickOpt.track].desc))); }
+        drawPv();
+        row.appendChild(pv);
+        var col = el('div', 'rx-info');
+        var W2 = ['auto'].concat(Object.keys(R.WEATHERS));
+        col.appendChild(optRow(L('コース', 'Track'), function () { var tr = R.TRACKS[quickOpt.track]; return trackName(quickOpt.track) + ' ' + '★'.repeat(tr.diff); }, function (d) {
+          quickOpt.track = tracks[(tracks.indexOf(quickOpt.track) + d + tracks.length) % tracks.length]; drawPv();
+        }));
+        col.appendChild(optRow(L('周回', 'Laps'), function () { return isTouge(quickOpt.track) ? L('1（峠は一本勝負）', '1 (point to point)') : String(quickOpt.laps); }, function (d) { quickOpt.laps = clamp(quickOpt.laps + d, 1, 9); }));
+        col.appendChild(optRow(L('難易度', 'Level'), function () { return t(R.LEVEL_NAMES[quickOpt.level]); }, function (d) { var ks = ['easy', 'normal', 'hard']; quickOpt.level = ks[(ks.indexOf(quickOpt.level) + d + 3) % 3]; }));
+        col.appendChild(optRow(L('天気', 'Weather'), function () { return quickOpt.weather === 'auto' ? L('コース標準', 'Track default') : t(R.WEATHERS[quickOpt.weather]); }, function (d) { quickOpt.weather = W2[(W2.indexOf(quickOpt.weather) + d + W2.length) % W2.length]; drawPv(); }));
+        col.appendChild(optRow(L('ミラー（左右反転）', 'Mirror'), function () { return quickOpt.mirror ? 'ON' : 'OFF'; }, function () { quickOpt.mirror = !quickOpt.mirror; drawPv(); }));
+        col.appendChild(optRow(L('ライバル', 'Rivals'), function () { return quickOpt.rivals + L(' 台', ''); }, function (d) { quickOpt.rivals = clamp(quickOpt.rivals + d, 1, 7); }));
+        col.appendChild(item(L('車: ', 'Car: ') + t(R.car(s.car).name), L('ガレージで変える', 'Change in garage'), function () { go(SCREENS.garage()); }, { icon: '🔧' }));
+        col.appendChild(item(L('スタート', 'Start'), '', function () { runQuick(casual); }, { icon: '🏁', cls: 'accent' }));
+        row.appendChild(col);
+        p.appendChild(row);
+        p.appendChild(hint());
+        o.appendChild(p);
+      } };
+    };
+    function runQuick(casual) {
+      var q = { track: quickOpt.track, laps: quickOpt.laps, level: quickOpt.level, weather: quickOpt.weather, mirror: quickOpt.mirror };
+      app.cmd = (casual ? 'party ' : 'quick ') + q.track + ' ' + q.laps + ' ' + q.level + ' ' + q.weather + (q.mirror ? ' mirror' : '');
+      var pool = isTouge(q.track) ? R.TOUGE_DRIVERS : R.DRIVERS;
+      run({
+        make: function () { return baseCfg({ track: q.track, laps: q.laps, level: q.level, weather: q.weather, mirror: q.mirror, casual: casual,
+                                             field: R.makeField(Math.min(quickOpt.rivals, pool.length), carPace(), pool) }); },
+        onResult: function (r) { return applyResult({ kind: casual ? 'party' : 'quick', track: q.track, mirror: q.mirror, level: q.level }, r); }
+      });
+    }
+
+    /* ---------- 峠バトル ---------- */
+    var tougeOpt = { track: 'akimine', rival: 0 };
+    SCREENS.touge = function () {
+      return { build: function (o) {
+        var s = R.load();
+        var p = panel(L('峠バトル', 'Touge Battle'), t(R.MODES.touge.desc));
+        var row = el('div', 'rx-row');
+        var pv = el('div', 'rx-pv');
+        function drawPv() { pv.innerHTML = ''; pv.appendChild(preview(tougeOpt.track, 400, 225)); pv.appendChild(el('div', 'rx-s', t(R.TRACKS[tougeOpt.track].desc))); }
+        drawPv();
+        row.appendChild(pv);
+        var col = el('div', 'rx-info');
+        col.appendChild(optRow(L('峠', 'Pass'), function () { return trackName(tougeOpt.track); }, function (d) { var a = R.TOUGE; tougeOpt.track = a[(a.indexOf(tougeOpt.track) + d + a.length) % a.length]; drawPv(); }));
+        col.appendChild(optRow(L('相手', 'Rival'), function () { var r = R.TOUGE_DRIVERS[tougeOpt.rival]; return r.name + '（' + t(R.car({ fc: 'fc', fd: 'fd', r32: 'r32', s13: 's13', evo: 'evo', gc8: 'gc8' }[r.body]).name) + '）'; },
+                                function (d) { tougeOpt.rival = (tougeOpt.rival + d + R.TOUGE_DRIVERS.length) % R.TOUGE_DRIVERS.length; }));
+        col.appendChild(el('div', 'rx-s', L('峠の勝利数 ', 'Touge wins ') + (s.stats.touge || 0) + L('　ベスト ', '  best ') + fmt(s.laps[tougeOpt.track])));
+        col.appendChild(item(L('車: ', 'Car: ') + t(R.car(s.car).name), L('おすすめ: AE86・FC・FD・ZN8', 'Try AE86, FC, FD, ZN8'), function () { go(SCREENS.garage()); }, { icon: '🔧' }));
+        col.appendChild(item(L('バトル開始', 'Battle!'), '', function () { runTouge(); }, { icon: '⛰', cls: 'accent' }));
+        col.appendChild(item(L('タイムアタック（この峠）', 'Time attack this pass'), '', function () { runSingle('time', tougeOpt.track); }, { icon: '⏱' }));
+        row.appendChild(col);
+        p.appendChild(row);
+        p.appendChild(hint());
+        o.appendChild(p);
+      } };
+    };
+    function runTouge() {
+      var tr = tougeOpt.track, d = R.TOUGE_DRIVERS[tougeOpt.rival];
+      app.cmd = 'touge ' + tr + ' ' + d.name.toLowerCase();
+      run({
+        make: function () { return baseCfg({ track: tr, mode: 'touge', field: [{ name: d.name, color: d.color, body: d.body, ai: d.ai, skill: 0.95, pace: Math.max(0.86, carPace()) }] }); },
+        onResult: function (r) { return applyResult({ kind: 'touge', track: tr }, r); }
+      });
+    }
+
+    /* ---------- コースを選ぶ（タイムアタック・チャレンジ） ---------- */
+    SCREENS.trackPick = function (mode, extra) {
+      var tracks = mode === 'time' ? R.ALL_TRACKS : loopTracks();
+      return { build: function (o) {
+        var s = R.load();
+        var p = panel(t((R.MODES[mode] || R.CASUAL[mode]).name), t((R.MODES[mode] || R.CASUAL[mode]).desc || { ja: '', en: '' }));
+        p.appendChild(list(tracks.map(function (id) {
+          var best = s.laps[id];
+          return item(trackName(id), '★'.repeat(R.TRACKS[id].diff) + (R.TRACKS[id].touge ? L('　峠', '  pass') : '') + (mode === 'time' && R.loadGhost(id) ? L('　ゴーストあり', '  ghost') : ''),
+                      function () { runSingle(mode, id, extra); }, { right: best ? fmt(best) : '' });
+        }), 3));
+        p.appendChild(hint());
+        o.appendChild(p);
+      } };
+    };
+
+    function runSingle(mode, track, extra) {
+      extra = extra || {};
+      app.cmd = mode + ' ' + track + (extra.boss ? ' ' + extra.boss : '');
+      var kind = mode === 'time' ? 'time' : mode === 'party' ? 'party' : 'challenge';
+      run({
+        make: function () {
+          var field = [];
+          var cp = carPace();
+          if (mode === 'elim') field = R.makeField(5, cp);
+          if (mode === 'duel') field = [extra.boss ? R.boss(extra.boss, Math.max(cp, 0.9)) : { name: 'MONO', color: '#eee', body: 'formula', ai: 'technician', skill: 1, pace: cp }];
+          if (mode === 'chase') field = [R.boss('phantom', 0.88)];
+          if (mode === 'party') field = R.makeField(7, cp);
+          return baseCfg({ track: track, mode: mode === 'party' ? 'race' : mode, field: field, carId: mode === 'chase' ? 'police' : null, casual: mode === 'party' });
+        },
+        onResult: function (r) { return applyResult({ kind: kind, track: track }, r); }
+      });
+    }
+
+    SCREENS.challenges = function () {
+      return { build: function (o) {
+        var s = R.load();
+        var p = panel(L('チャレンジ', 'Challenges'), '');
+        var items = ['elim', 'duel', 'arcade', 'chase', 'traffic'].map(function (m) {
+          return item(t(R.MODES[m].name), t(R.MODES[m].desc), function () {
+            if (m === 'duel') go(SCREENS.duel()); else go(SCREENS.trackPick(m));
+          }, { icon: { elim: '💀', duel: '⚔', arcade: '⏲', chase: '🚓', traffic: '🛣' }[m] });
+        });
+        items.push(item(L('戻る', 'Back'), '', back, { icon: '↩' }));
+        p.appendChild(list(items));
+        p.appendChild(hint());
+        o.appendChild(p);
+      } };
+    };
+    SCREENS.duel = function () {
+      return { build: function (o) {
+        var s = R.load();
+        var p = panel(L('デュエル — 相手を選ぶ', 'Duel — pick a rival'), L('ストーリーで倒したボスと再戦できます', 'Rematch bosses you beat in the story'));
+        var items = Object.keys(R.BOSSES).filter(function (k) { return k !== 'phantom'; }).map(function (k) {
+          var ok = !!s.bosses[k];
+          return item(R.BOSSES[k].name, ok ? L('撃破済み', 'defeated') : L('ストーリーで倒すと開放', 'beat in story to unlock'), function () { go(SCREENS.trackPick('duel', { boss: k })); }, { icon: ok ? '⚔' : '🔒', dis: !ok });
+        });
+        items.unshift(item('MONO', L('フォーミュラの腕利き（いつでも）', 'Formula ace (always available)'), function () { go(SCREENS.trackPick('duel')); }, { icon: '⚔' }));
+        items.push(item(L('戻る', 'Back'), '', back, { icon: '↩' }));
+        p.appendChild(list(items, 2));
+        p.appendChild(hint());
+        o.appendChild(p);
+      } };
+    };
+
+    /* ---------- ミニゲーム・カジュアル ---------- */
+    SCREENS.minis = function () {
+      return { build: function (o) {
+        var s = R.load();
+        var p = panel(L('ミニゲーム', 'Mini Games'), '');
+        var items = Object.keys(R.MINIS).map(function (k) {
+          var b = s.mini[k];
+          return item(t(R.MINIS[k].name), t(R.MINIS[k].desc), function () { runMini(k); },
+                      { icon: { gymkhana: '🔶', drag: '🚦', brake: '🛑' }[k], right: b !== undefined ? (k === 'brake' ? b + L('点', 'pt') : fmt(b)) : '' });
+        });
+        items.push(item(L('戻る', 'Back'), '', back, { icon: '↩' }));
+        p.appendChild(list(items));
+        p.appendChild(hint());
+        o.appendChild(p);
+      } };
+    };
+    SCREENS.casual = function () {
+      return { build: function (o) {
+        var s = R.load();
+        var p = panel(L('カジュアル', 'Casual'), L('本格志向ではないお楽しみ枠。ここだけコインと加速パネルが出ます', 'Just for fun — the only place with coins and boost pads'));
+        p.appendChild(list([
+          item(t(R.CASUAL.party.name), t(R.CASUAL.party.desc), function () { go(SCREENS.quick(true)); }, { icon: '🎉' }),
+          item(t(R.CASUAL.coins.name), t(R.CASUAL.coins.desc), function () { runMini('coins'); }, { icon: '🪙', right: s.mini.coins !== undefined ? s.mini.coins + L(' 枚', '') : '' }),
+          item(L('戻る', 'Back'), '', back, { icon: '↩' })
+        ]));
+        p.appendChild(hint());
+        o.appendChild(p);
+      } };
+    };
+    function runMini(kind) {
+      app.cmd = 'mini ' + kind;
+      run({ make: function () { return miniCfg(kind); },
+            onResult: function (r) { return applyResult({ kind: 'mini', track: kind === 'coins' ? 'hamamatsu' : MINI_SPEC[kind] }, r); } });
+    }
+
+    /* ---------- ガレージ ---------- */
+    var garageSel = null;
+    SCREENS.garage = function () {
+      return { build: function (o) {
+        var s = R.load();
+        if (!garageSel) garageSel = s.car;
+        var p = panel(L('ガレージ', 'Garage'), s.owned.length + ' / ' + R.CARS.length + L(' 台', ' cars'));
+        var row = el('div', 'rx-row garage');
+        var lst = el('div', 'rx-list rx-cars');
+        var detail = el('div', 'rx-detail');
+        var carCv = el('canvas', 'rx-carcv'); carCv.width = 360; carCv.height = 200;
+        function showCar(id) {
+          garageSel = id;
+          var car = R.car(id), s2 = R.load(), own = R.ownedCar(s2, id), locked = R.carLocked(s2, car);
+          detail.innerHTML = '';
+          detail.appendChild(carCv);
+          R.drawCarCard(carCv, car.body, R.carColor(s2, car));
+          detail.appendChild(el('div', 'rx-cname', t(car.name) + '　[' + car.cls + ']' + (car.fun ? L('　お遊び', '  fun') : '')));
+          detail.appendChild(el('div', 'rx-s', t(car.desc)));
+          detail.appendChild(statBars(R.effStats(car, s2.upg[id])));
+          detail.appendChild(el('div', 'rx-s', L('エンジン: ', 'Engine: ') + R.soundName(car.body)));
+          var acts = el('div', 'rx-acts');
+          function act(label, on, dis) { var b = el('button', 'rx-btn', label); b.type = 'button'; if (dis) b.disabled = true; b.addEventListener('click', function (e) { e.stopPropagation(); on(); }); acts.appendChild(b); }
+          act(L('♪ エンジン音を聞く', '♪ Hear the engine'), function () {
+            var au = R.carAudio(car.body), t0 = performance.now();
+            (function f() {
+              var e = (performance.now() - t0) / 1000;
+              au.update({ speed: 0, throttle: e < 0.5 || (e > 1.1 && e < 1.7) || (e > 2.1 && e < 2.4) });
+              if (e < 3.4) requestAnimationFrame(f); else au.stop();
+            })();
+          });
+          if (own) {
+            act(s2.car === id ? L('✔ 乗車中', '✔ In use') : L('この車に乗る', 'Drive this'), function () { R.edit(function (x) { x.car = id; }); sfx('coin'); refresh(); }, s2.car === id);
+            act(L('色を変える', 'Repaint'), function () { R.edit(function (x) { var i = x.paint[id] === undefined ? car.paint : x.paint[id]; x.paint[id] = (i + 1) % R.PAINTS.length; }); sfx('click'); showCar(id); });
+            R.UPGRADES.forEach(function (u) {
+              var lv = (s2.upg[id] || {})[u.id] || 0, cost = lv < 3 ? R.upgCost(car, lv) : 0;
+              act(t(u.name) + ' ' + '■'.repeat(lv) + '□'.repeat(3 - lv) + (lv < 3 ? '  ' + yen(cost) : ''), function () {
+                var ok = R.edit(function (x) { if (x.money < cost) return false; x.money -= cost; x.upg[id] = x.upg[id] || {}; x.upg[id][u.id] = lv + 1; return true; });
+                sfx(ok ? 'coin' : 'bad'); refresh();
+              }, lv >= 3 || s2.money < cost);
+            });
+          } else if (locked) {
+            act(L('🔒 ストーリー・アルバイトで入手', '🔒 Earned through story / jobs'), function () {}, true);
+          } else {
+            act(L('購入 ', 'Buy ') + yen(car.price), function () {
+              var ok = R.edit(function (x) { if (x.money < car.price) return false; x.money -= car.price; x.owned.push(id); x.car = id; return true; });
+              sfx(ok ? 'win' : 'bad'); refresh();
+            }, s2.money < car.price);
+          }
+          detail.appendChild(acts);
+        }
+        var selIdx = 0;
+        R.CARS.forEach(function (car, i) {
+          var own = R.ownedCar(s, car.id), locked = R.carLocked(s, car);
+          if (car.id === garageSel) selIdx = i;
+          lst.appendChild(item((s.car === car.id ? '▶ ' : '') + t(car.name), '[' + car.cls + '] ' + (own ? L('所有', 'owned') : locked ? L('未開放', 'locked') : yen(car.price)),
+                               function () { showCar(car.id); var f = detail.querySelector('.rx-btn:not([disabled])'); if (f) f.focus(); },
+                               { icon: own ? '🚗' : locked ? '🔒' : '🏷', focus: function () { showCar(car.id); } }));
+        });
+        row.appendChild(lst); row.appendChild(detail);
+        p.appendChild(row);
+        p.appendChild(hint(L('↑↓ 車を選ぶ　ボタンはクリック　Esc 戻る', '↑↓ pick a car  click buttons  Esc back')));
+        o.appendChild(p);
+        this.sel = selIdx;
+        showCar(garageSel);
+      }, sel: 0 };
+    };
+
+    /* ---------- 記録・設定 ---------- */
+    SCREENS.records = function () {
+      return { build: function (o) {
+        var s = R.load(), st = s.stats;
+        var p = panel(L('記録', 'Records'), '');
+        var tb = el('div', 'rx-table cols');
+        [[L('レース', 'Races'), st.races], [L('優勝', 'Wins'), st.wins], [L('表彰台', 'Podiums'), st.podiums], [L('カップ総合優勝', 'Cup titles'), st.titles],
+         [L('峠バトル勝利', 'Touge wins'), st.touge || 0], [L('走行距離', 'Distance'), (st.km || 0).toFixed(1) + ' km'], [L('ニアミス', 'Near misses'), st.near || 0],
+         [L('アルバイト', 'Jobs'), (st.jobs || 0) + L(' 件 / ', ' / ') + yen(st.earned || 0)], [L('ストーリー', 'Story'), Math.min(s.story, R.STORY.length) + ' / ' + R.STORY.length],
+         [L('所持金', 'Credits'), yen(s.money)]].forEach(function (kv) { var d = el('div', 'rx-tr'); d.appendChild(el('span', '', kv[0])); d.appendChild(el('span', '', String(kv[1]))); tb.appendChild(d); });
+        p.appendChild(tb);
+        p.appendChild(el('div', 'rx-sec', L('自己ベスト（ラップ／峠は全区間）', 'Best laps (whole run for passes)')));
+        var tb2 = el('div', 'rx-table cols3');
+        R.ALL_TRACKS.forEach(function (id) { var d = el('div', 'rx-tr'); d.appendChild(el('span', '', trackName(id))); d.appendChild(el('span', '', fmt(s.laps[id]))); tb2.appendChild(d); });
+        p.appendChild(tb2);
+        p.appendChild(el('div', 'rx-sec', L('カップ', 'Cups')));
+        p.appendChild(el('div', 'rx-s', R.CUPS.map(function (c) { return t(c.name) + ' ' + (s.cups[c.id] ? '🏅' + t(R.MEDALS[s.cups[c.id]]) : '—'); }).join('　')));
+        p.appendChild(list([item(L('戻る', 'Back'), '', back, { icon: '↩' })]));
+        o.appendChild(p);
+      } };
+    };
+    SCREENS.settings = function () {
+      return { build: function (o) {
+        var p = panel(L('設定・遊び方', 'Settings & Help'), '');
+        p.appendChild(optRow(L('難易度（標準）', 'Default level'), function () { return t(R.LEVEL_NAMES[R.load().level]); }, function (d) {
+          R.edit(function (s) { var ks = ['easy', 'normal', 'hard']; s.level = ks[(ks.indexOf(s.level) + d + 3) % 3]; });
+        }));
+        p.appendChild(optRow(L('効果音', 'Sound'), function () { return TB.store.get('sound', '1') === '1' ? 'ON' : 'OFF'; }, function () { TB.Sfx.set(TB.store.get('sound', '1') !== '1'); }));
+        var help = el('div', 'rx-help');
+        [L('←→ ハンドル　↑ アクセル　↓ ブレーキ　スペース ニトロ（ゼロヨンではシフトアップ）', '←→ steer  ↑ gas  ↓ brake  space nitro (shift up in drag)'),
+         L('p / Esc 一時停止　m 文字版（TUI）と GUI の切り替え　r（止まって）オープンワールドで U ターン', 'p / Esc pause  m switch text/GUI  r (stopped) U-turn in open world'),
+         L('前の車の真後ろにつくとスリップストリームで加速し、ニトロも溜まります。', 'Draft right behind a car to gain speed and refill nitro.'),
+         L('峠はガードレールで囲まれています。こすると減速。後追いから始まり、150m 引き離せば即勝利。', 'Passes have guardrails. Touge starts from behind; 150m gap wins instantly.'),
+         L('雨・雪では滑ります。4WD（オフロード対応）の車は影響が小さめ。', 'Rain and snow reduce grip. AWD cars suffer less.'),
+         L('コインや加速パネルは「カジュアル」だけ。ほかのモードは本格仕様です。', 'Coins and boost pads appear only in Casual. Everything else is serious.')].forEach(function (x) { help.appendChild(el('div', '', '・' + x)); });
+        p.appendChild(help);
+        p.appendChild(list([item(L('データを消す（設定コマンドから）', 'Erase data (via settings command)'), L('settings で「記録」を消せます', 'Use the settings command'), function () {}, { icon: '🗑', dis: true }),
+                            item(L('戻る', 'Back'), '', back, { icon: '↩' })]));
+        o.appendChild(p);
+      } };
+    };
+
+    /* =================== 走る =================== */
+
+    function run(opts) {
+      app.runOpts = opts;
+      app.demo = null;
+      if (app.sess) app.sess.stop();
+      over.innerHTML = ''; over.classList.add('hidden');
+      app.mode = 'race'; app.paused = false; app.keyHook = null;
+      sizeCanvas();
+      var cfg = opts.make();
+      prep(cfg, opts);
+      app.sess = R.Session(cfg);
+      app.sess.W = cv.width; app.sess.H = cv.height;
+      padBox.innerHTML = ''; padBox.appendChild(R.makePad(function () { return app.sess; }));
+    }
+    function prep(cfg, opts) {
+      cfg.onFinish = function (r) {
+        var sum = opts.onResult ? opts.onResult(r) : applyResult({ kind: 'none', track: cfg.track }, r);
+        setTimeout(function () { if (app.sess && app.sess.cfg === cfg) results(sum, r, opts); }, 1100);
+      };
+      if (opts.chain) cfg.onEdgeEnd = function (carry) {
+        var nx = opts.chain(carry);
+        if (!nx) return;
+        setTimeout(function () {
+          if (!app.sess || app.mode !== 'race') return;
+          var keys = app.sess.keys, old = app.sess;
+          old.stop();
+          prep(nx, opts);
+          app.sess = R.Session(nx);
+          app.sess.W = cv.width; app.sess.H = cv.height;
+          for (var k in keys) app.sess.keys[k] = keys[k];
+        }, 0);
+      };
+    }
+    function results(sum, r, opts) {
+      app.mode = 'result';
+      if (app.sess) app.sess.releaseKeys();
+      padBox.innerHTML = '';
+      over.classList.remove('hidden'); over.innerHTML = '';
+      var p = panel(sum.title, sum.sub);
+      p.classList.add('rx-result');
+      if (sum.success !== null && sum.success !== undefined) p.appendChild(el('div', 'rx-big ' + (sum.success ? 'ok' : 'ng'), sum.success ? L('MISSION CLEAR', 'MISSION CLEAR') : L('MISSION FAILED', 'MISSION FAILED')));
+      if (sum.table) {
+        var tb = el('div', 'rx-table');
+        sum.table.forEach(function (e, i) {
+          var d = el('div', 'rx-tr' + (e.you ? ' me' : ''));
+          var nm = el('span', ''); var sw = el('i', 'rx-sw'); sw.style.background = e.you ? r && app.sess ? app.sess.cfg.car.color : '#5ccfa0' : e.color || '#888'; nm.appendChild(sw);
+          nm.appendChild(document.createTextNode((i + 1) + '. ' + (e.you ? L('あなた', 'YOU') : e.name) + (e.boss ? ' ★' : '')));
+          d.appendChild(nm);
+          d.appendChild(el('span', '', e.out ? L('脱落', 'OUT') : e.time !== null && e.time !== undefined ? fmt(e.time * 1000) : '—'));
+          tb.appendChild(d);
+        });
+        p.appendChild(tb);
+      }
+      sum.lines.forEach(function (ln) { p.appendChild(el('div', 'rx-line', ln)); });
+      if (opts.extra) { p.appendChild(el('div', 'rx-sec', L('選手権ポイント', 'Standings'))); opts.extra().forEach(function (ln) { p.appendChild(el('div', 'rx-line dim', ln)); }); }
+      var btns = opts.buttons ? opts.buttons(sum, r) : [{ label: L('もう一度', 'Race again'), on: function () { run(opts); } }];
+      if (!opts.buttons || !btns.some(function (b) { return b.menu; })) btns.push({ label: L('メニューへ', 'Menu'), menu: true, on: toMenu });
+      p.appendChild(list(btns.map(function (b) { return item(b.label, '', b.on, { icon: b.menu ? '↩' : '▶' }); }), Math.min(3, btns.length)));
+      over.appendChild(p);
+      app.sel = 0; highlight();
+    }
+    function toMenu() {
+      if (app.sess) app.sess.stop();
+      app.sess = null; app.mode = 'menu'; padBox.innerHTML = ''; app.paused = false;
+      startDemo();
+      show(app.stack[app.stack.length - 1]);
+    }
+    function pause() {
+      if (app.mode !== 'race') return;
+      app.paused = true; app.sess.paused = true; app.sess.releaseKeys();
+      over.classList.remove('hidden'); over.innerHTML = '';
+      var p = panel(L('一時停止', 'Paused'), '');
+      var w = app.runOpts.world;
+      var items = [
+        item(L('つづける', 'Resume'), '', resume, { icon: '▶' }),
+        !w ? item(L('やり直す', 'Restart'), '', function () { run(app.runOpts); }, { icon: '↻' }) : null,
+        item(w ? L('ドライブを終える', 'End the drive') : L('やめる', 'Quit'), '', function () {
+          if (w) worldEnd(w); else toMenu();
+        }, { icon: '■' }),
+        item(L('文字版（TUI）へ', 'Text mode'), '', toTui, { icon: '⌨' })
+      ].filter(Boolean);
+      p.appendChild(list(items));
+      over.appendChild(p);
+      app.sel = 0; highlight();
+      app.keyHook = function (k) { if (k === 'p' || k === 'P' || k === 'Escape') { resume(); return true; } return false; };
+    }
+    function resume() { app.paused = false; if (app.sess) app.sess.paused = false; app.keyHook = null; over.innerHTML = ''; over.classList.add('hidden'); app.mode = 'race'; }
+    function worldEnd(w) {
+      if (app.sess) app.sess.stop();
+      app.sess = null; app.mode = 'menu'; app.paused = false; padBox.innerHTML = '';
+      startDemo();
+      over.classList.remove('hidden'); over.innerHTML = '';
+      var p = panel(L('ドライブ終了', 'Drive over'), '');
+      w.summary().forEach(function (ln) { p.appendChild(el('div', 'rx-line', ln)); });
+      p.appendChild(list([item(L('メニューへ', 'Menu'), '', function () { show(app.stack[app.stack.length - 1]); }, { icon: '↩' })]));
+      over.appendChild(p);
+      app.sel = 0; highlight(); app.keyHook = null;
+    }
+
+    function toTui() {
+      var cmd = app.mode === 'race' || app.mode === 'result' ? app.cmd : '';
+      win.close();
+      TB.submit('race tui ' + cmd);
+    }
+    function cleanup() {
+      app.closed = true;
+      cancelAnimationFrame(raf);
+      if (app.sess) app.sess.stop();
+      TB.Term.release();
+      TB.Term.focus();
+    }
+    function onResize() { if (app.closed) { window.removeEventListener('resize', onResize); return; } if (!app.sess) { sizeCanvas(); if (app.demo) { app.demo.W = cv.width; app.demo.H = cv.height; } } }
+    window.addEventListener('resize', onResize);
+
+    /* --- 外から来た行き先 --- */
+    app.route = function (rt) {
+      var parts = String(rt || 'title').split(/\s+/), a = parts[0];
+      app.stack = [SCREENS.title()];
+      show(app.stack[0]);
+      var s = R.load();
+      if (a === 'story') {
+        go(SCREENS.story());
+        var id = parts[1], idx = id ? R.STORY.indexOf(R.storyEvent(id)) : Math.min(s.story, R.STORY.length - 1);
+        if (idx >= 0 && idx <= s.story) go(SCREENS.brief(idx));
+      } else if (a === 'world') go(SCREENS.world(null));
+      else if (a === 'job' || a === 'jobs') { go(SCREENS.jobs()); if (R.JOBS[parts[1]]) go(SCREENS.world(parts[1])); }
+      else if (a === 'gp' || a === 'career') { go(SCREENS.gp()); var cup = R.CUPS.filter(function (c) { return c.id === parts[1]; })[0]; if (cup && R.cupUnlocked(s, cup)) go(SCREENS.cup(cup.id)); }
+      else if (a === 'quick' || a === 'party') {
+        var casual = a === 'party';
+        if (casual) go(SCREENS.casual());
+        if (parts[1] && R.TRACKS[parts[1]]) {
+          quickOpt.track = parts[1];
+          if (parts[2]) quickOpt.laps = clamp(parseInt(parts[2], 10) || 2, 1, 9);
+          if (R.LEVELS[parts[3]]) quickOpt.level = parts[3];
+          if (parts[4]) quickOpt.weather = parts[4];
+          quickOpt.mirror = parts.indexOf('mirror') >= 0;
+          go(SCREENS.quick(casual)); runQuick(casual);
+        } else go(SCREENS.quick(casual));
+      }
+      else if (a === 'touge') { if (R.TRACKS[parts[1]] && R.TRACKS[parts[1]].touge) tougeOpt.track = parts[1]; go(SCREENS.touge()); }
+      else if (a === 'time') { go(SCREENS.trackPick('time')); if (R.TRACKS[parts[1]]) runSingle('time', parts[1]); }
+      else if (['elim', 'duel', 'arcade', 'chase', 'traffic'].indexOf(a) >= 0) { go(SCREENS.challenges()); go(SCREENS.trackPick(a)); if (R.TRACKS[parts[1]] && !isTouge(parts[1])) runSingle(a, parts[1], { boss: parts[2] && s.bosses[parts[2]] ? parts[2] : null }); }
+      else if (a === 'challenge' || a === 'challenges') go(SCREENS.challenges());
+      else if (a === 'mini' || a === 'minis') { go(SCREENS.minis()); if (R.MINIS[parts[1]]) runMini(parts[1]); }
+      else if (a === 'coins') { go(SCREENS.casual()); runMini('coins'); }
+      else if (a === 'casual') go(SCREENS.casual());
+      else if (a === 'garage' || a === 'shop' || a === 'cars') go(SCREENS.garage());
+      else if (a === 'stats' || a === 'records') go(SCREENS.records());
+      else if (a === 'help' || a === 'settings') go(SCREENS.settings());
+      else if (R.TRACKS[a]) { quickOpt.track = a; go(SCREENS.quick(false)); runQuick(false); }
+    };
+    return app;
+  }
+
+  /* =====================================================================
+     TUI 版（ターミナルの中）
+     ===================================================================== */
+
+  function out(lines) { TB.Term.printAll(lines); TB.Term.scroll(); }
+  function ask(label, fn) {
+    TB.setLineHandler(function (input) { TB.setLineHandler(null); fn(String(input || '').trim().toLowerCase()); }, label);
+  }
+  function link(text, cmd, c) { return { t: text, cmd: cmd, c: c || 'accent' }; }
+
+  /** 文字版で 1 本走る。done(result, sum) */
+  function tuiRun(cfg, opts, done) {
+    TB.setLineHandler(null);
+    R.runText(cfg, function (r, why, sum) {
+      if (!r) { out([[{ t: L('中断しました。', 'Stopped.'), c: 'dim' }], '']); if (opts.world) out(opts.world.summary().map(function (x) { return [{ t: x, c: 'accent' }]; })); if (done) done(null, null); return; }
+      var lines = [''].concat([[{ t: '── ' + sum.title + ' ', c: 'accent bold' }, { t: sum.sub, c: 'dim' }]]);
+      if (sum.success !== null && sum.success !== undefined) lines.push([{ t: sum.success ? 'MISSION CLEAR' : 'MISSION FAILED', c: sum.success ? 'accent bold' : 'err bold' }]);
+      if (sum.table) sum.table.forEach(function (e, i) { lines.push({ row: [[{ t: (i + 1) + '. ' + (e.you ? L('あなた', 'YOU') : e.name), c: e.you ? 'accent bold' : '' }], e.out ? L('脱落', 'OUT') : e.time !== null && e.time !== undefined ? fmt(e.time * 1000) : '—'] }); });
+      sum.lines.forEach(function (ln) { lines.push([{ t: ln, c: 'warn' }]); });
+      out(lines);
+      if (done) done(r, sum);
+    }, {
+      title: opts.title || 'TUI RACING', subtitle: opts.subtitle,
+      onResult: opts.onResult, chain: opts.chain,
+      onSwitch: function () { TB.setLineHandler(null); setTimeout(function () { TB.submit('race gui ' + (opts.cmd || '')); }, 0); }
+    });
+  }
+
+  function tuiMenu() {
+    var s = R.load();
+    var o = TB.head('TUI RACING');
+    o.push([{ t: L('ターミナル発・本格レーシング。峠からサーキット、浜松から名古屋まで。', 'Serious racing from the terminal — passes, circuits, Hamamatsu to Nagoya.'), c: 'dim' }]);
+    o.push([{ t: L('愛車 ', 'Car ') + t(R.car(s.car).name) + '　' + yen(s.money) + '　' + L('難易度 ', 'Level ') + t(R.LEVEL_NAMES[s.level]), c: 'warn' }], '');
+    function row(label, cmd, desc) { o.push([{ t: '  ' }, link(label, 'race ' + cmd), { t: '   ' + desc, c: 'dim' }]); }
+    o.push([{ t: L('本格', 'Serious'), c: 'accent-2 bold' }]);
+    row(L('ストーリー', 'Story'), 'story', Math.min(s.story, R.STORY.length) + ' / ' + R.STORY.length);
+    row(L('オープンワールド', 'Open world'), 'world', L('浜松〜東名・新東名〜名古屋', 'Hamamatsu to Nagoya'));
+    row(L('アルバイト: タクシー', 'Job: taxi'), 'job taxi', L('お客さんを運ぶ', 'carry fares'));
+    row(L('アルバイト: 宅配便', 'Job: parcels'), 'job delivery', L('こわれものに注意', 'mind the fragile ones'));
+    row(L('アルバイト: 出前', 'Job: food'), 'job food', L('うなぎ弁当を急いで', 'rush the eel lunch'));
+    row(L('グランプリ', 'Grand Prix'), 'gp', R.CUPS.map(function (c) { return c.id; }).join(' / '));
+    row(L('クイックレース', 'Quick race'), 'quick coast', 'race quick <' + L('コース', 'track') + '> [周回] [easy|normal|hard] [天気] [mirror]');
+    row(L('峠バトル', 'Touge battle'), 'touge akimine', R.TOUGE.join(' / '));
+    row(L('タイムアタック', 'Time attack'), 'time coast', L('ゴーストと勝負', 'race your ghost'));
+    row(L('エリミネーション', 'Elimination'), 'elim desert', '');
+    row(L('デュエル', 'Duel'), 'duel coast', L('倒したボスと再戦: race duel <コース> <ボス>', 'rematch: race duel <track> <boss>'));
+    row(L('アーケード', 'Arcade'), 'arcade city', '');
+    row(L('ポリスチェイス', 'Police chase'), 'chase highway', '');
+    row(L('ハイウェイ・サバイバル', 'Highway survival'), 'traffic tomei', '');
+    row(L('ミニゲーム: ジムカーナ', 'Mini: gymkhana'), 'mini gymkhana', '');
+    row(L('ミニゲーム: ゼロヨン', 'Mini: drag'), 'mini drag', L('スペースでシフトアップ', 'space to shift'));
+    row(L('ミニゲーム: ピタッと停止', 'Mini: brake test'), 'mini brake', '');
+    o.push('', [{ t: L('カジュアル（コイン・加速パネルあり）', 'Casual (coins & boost pads)'), c: 'accent-2 bold' }]);
+    row(L('パーティレース', 'Party race'), 'party hamamatsu', '');
+    row(L('コインラッシュ', 'Coin rush'), 'coins', '');
+    o.push('', [{ t: L('そのほか', 'More'), c: 'accent-2 bold' }]);
+    row(L('ガレージ', 'Garage'), 'garage', R.CARS.length + L(' 車種', ' cars'));
+    row(L('記録', 'Records'), 'stats', '');
+    row(L('コース一覧', 'Tracks'), 'tracks', R.ALL_TRACKS.length + L(' コース', ' tracks'));
+    o.push('', [{ t: L('GUI 版（ウィンドウ）で遊ぶ: ', 'GUI version: '), c: 'dim' }, link('race gui', 'race gui')], '');
+    return o;
+  }
+
+  function tuiTracks() {
+    var s = R.load(), o = TB.head(L('コース一覧', 'Tracks'));
+    R.ALL_TRACKS.forEach(function (id) {
+      var tr = R.TRACKS[id];
+      o.push([{ t: '  ' }, link(trackName(id), 'race quick ' + id), { t: '  ' + '★'.repeat(tr.diff) + (tr.touge ? L('  峠', '  pass') : '') + L('  ベスト ', '  best ') + fmt(s.laps[id]), c: 'dim' }]);
+      o.push([{ t: '      ' + t(tr.desc), c: 'dim' }]);
+    });
+    o.push('');
+    return o;
+  }
+
+  function tuiStats() {
+    var s = R.load(), st = s.stats, o = TB.head(L('記録', 'Records'));
+    [[L('レース', 'races'), st.races], [L('優勝', 'wins'), st.wins], [L('表彰台', 'podiums'), st.podiums], [L('カップ優勝', 'cup titles'), st.titles],
+     [L('峠バトル勝利', 'touge wins'), st.touge || 0], [L('走行距離', 'distance'), (st.km || 0).toFixed(1) + ' km'], [L('アルバイト', 'jobs'), (st.jobs || 0) + ' / ' + yen(st.earned || 0)],
+     [L('ストーリー', 'story'), Math.min(s.story, R.STORY.length) + ' / ' + R.STORY.length], [L('所持金', 'credits'), yen(s.money)]].forEach(function (kv) { o.push({ row: [kv[0], String(kv[1])] }); });
+    o.push('', [{ t: L('自己ベスト', 'Best times'), c: 'accent-2' }]);
+    R.ALL_TRACKS.forEach(function (id) { if (s.laps[id]) o.push({ row: [trackName(id), fmt(s.laps[id])] }); });
+    o.push('', [{ t: L('カップ: ', 'Cups: ') + R.CUPS.map(function (c) { return t(c.name) + (s.cups[c.id] ? '(' + t(R.MEDALS[s.cups[c.id]]) + ')' : ''); }).join(' '), c: 'dim' }], '');
+    return o;
+  }
+
+  /* ---------- 文字版ガレージ ---------- */
+  function garageLines() {
+    var s = R.load(), o = TB.head(L('ガレージ', 'Garage'));
+    o.push([{ t: L('所持金 ', 'Credits ') + yen(s.money) + L('　乗車中 ', '  driving ') + t(R.car(s.car).name), c: 'warn bold' }], '');
+    R.CARS.forEach(function (car, i) {
+      var own = R.ownedCar(s, car.id), locked = R.carLocked(s, car), st = R.effStats(car, s.upg[car.id]);
+      var row = [{ t: (s.car === car.id ? '▶' : ' ') + String(i + 1).padStart(2) + '. ', c: 'dim' }, { t: t(car.name), c: own ? 'accent' : '' }, { t: ' [' + car.cls + ']', c: 'dim' }];
+      row.push({ t: '  ' + L('速', 'S') + st.spd.toFixed(0) + ' ' + L('加', 'A') + st.acc.toFixed(0) + ' ' + L('曲', 'G') + st.grp.toFixed(0) + '  ', c: 'dim' });
+      if (own) row.push(s.car === car.id ? { t: L('乗車中', 'in use'), c: 'accent-2' } : link(L('乗る', 'drive'), 'use ' + (i + 1)));
+      else if (locked) row.push({ t: L('未開放', 'locked'), c: 'dim' });
+      else row.push(link(L('買う ', 'buy ') + yen(car.price), 'buy ' + (i + 1), s.money >= car.price ? 'accent' : 'dim'));
+      o.push(row);
+    });
+    var cur = R.car(s.car), u = s.upg[cur.id] || {};
+    o.push('', [{ t: L('改造（乗車中の車）: ', 'Upgrade current car: '), c: 'accent-2' }].concat(R.UPGRADES.map(function (x, i) {
+      var lv = u[x.id] || 0;
+      return lv >= 3 ? { t: t(x.name) + ' MAX  ', c: 'dim' } : link(t(x.name) + ' ' + '■'.repeat(lv) + '□'.repeat(3 - lv) + ' ' + yen(R.upgCost(cur, lv)) + '  ', 'up ' + (i + 1));
+    })));
+    o.push([{ t: L('色: ', 'Paint: '), c: 'dim' }, link(L('色を変える', 'repaint'), 'paint'), { t: L('　buy N / use N / up N / paint / q', '  buy N / use N / up N / paint / q'), c: 'dim' }], '');
+    return o;
+  }
+  function tuiGarage() {
+    function handler(v) {
+      var m = v.match(/^(buy|use|up)\s*(\d+)$/);
+      if (v === 'q' || v === 'quit' || v === '') { out([[{ t: L('ガレージを出ました。', 'Left the garage.'), c: 'dim' }], '']); return; }
+      if (v === 'paint') { R.edit(function (s) { var c = R.car(s.car), i = s.paint[c.id] === undefined ? c.paint : s.paint[c.id]; s.paint[c.id] = (i + 1) % R.PAINTS.length; }); sfx('click'); }
+      else if (m && m[1] === 'up') {
+        var x = R.UPGRADES[+m[2] - 1];
+        if (x) { var r = R.edit(function (s) { var c = R.car(s.car), lv = (s.upg[c.id] || {})[x.id] || 0; if (lv >= 3) return L('最大です', 'maxed'); var cost = R.upgCost(c, lv); if (s.money < cost) return L('お金が足りません', 'not enough credits'); s.money -= cost; s.upg[c.id] = s.upg[c.id] || {}; s.upg[c.id][x.id] = lv + 1; return null; }); if (r) { out([[{ t: r, c: 'err' }]]); sfx('bad'); } else sfx('coin'); }
+      } else if (m) {
+        var car = R.CARS[+m[2] - 1];
+        if (car) {
+          var msg = R.edit(function (s) {
+            if (m[1] === 'use') { if (!R.ownedCar(s, car.id)) return L('持っていません', 'not owned'); s.car = car.id; return null; }
+            if (R.ownedCar(s, car.id)) return L('もう持っています', 'already owned');
+            if (R.carLocked(s, car)) return L('ストーリー・アルバイトで入手します', 'earned in story / jobs');
+            if (s.money < car.price) return L('お金が足りません', 'not enough credits');
+            s.money -= car.price; s.owned.push(car.id); s.car = car.id; return null;
+          });
+          if (msg) { out([[{ t: msg, c: 'err' }]]); sfx('bad'); } else sfx('coin');
+        }
+      }
+      out(garageLines());
+      ask('garage>', handler);
+    }
+    ask('garage>', handler);
+    return garageLines();
+  }
+
+  /* ---------- 文字版の物語 ---------- */
+  function sceneLines(lines) {
+    return lines.map(function (ln) { var ch = R.CHARS[ln.who]; return [{ t: '▌' + t(ch.name) + '  ', c: 'accent-2 bold' }, { t: t(ln.text) }]; });
+  }
+  function tuiStory(id) {
+    var s = R.load();
+    var idx = id ? R.STORY.indexOf(R.storyEvent(id)) : s.story;
+    if (idx < 0) idx = s.story;
+    if (idx > s.story) { out([[{ t: L('まだ開放されていません。', 'Not unlocked yet.'), c: 'err' }]]); idx = s.story; }
+    if (idx >= R.STORY.length) {
+      var o = TB.head(L('ストーリー', 'Story'));
+      o.push([{ t: L('全エピソードをクリアしました！ もう一度遊ぶ話を選べます。', 'All episodes cleared! Pick one to replay.'), c: 'accent' }]);
+      R.STORY.forEach(function (e) { o.push([{ t: '  ' }, link(t(e.title), 'race story ' + e.id), { t: '  ' + trackName(e.track), c: 'dim' }]); });
+      out(o.concat(['']));
+      return;
+    }
+    var ev = R.STORY[idx];
+    var o2 = [''];
+    var first = R.STORY.filter(function (e) { return e.ch === ev.ch; })[0] === ev;
+    if (first) o2.push([{ t: '━━ ' + t(R.CHAPTERS.filter(function (c) { return c.id === ev.ch; })[0].name) + ' ━━', c: 'accent bold' }]);
+    if (ev.scene) o2 = o2.concat(sceneLines(ev.scene));
+    o2.push('', [{ t: '■ ' + t(ev.title), c: 'warn bold' }]);
+    o2.push({ row: [L('コース', 'track'), trackName(ev.track)] });
+    o2.push({ row: [L('目標', 'goal'), goalText(ev.goal, ev.track)] });
+    o2.push({ row: [L('報酬', 'reward'), yen(ev.reward)] });
+    if (ev.boss) o2.push({ row: ['BOSS', R.BOSSES[ev.boss].name] });
+    o2.push([{ t: L('Enter でスタート / q でやめる', 'Enter to start / q to quit'), c: 'dim' }], '');
+    out(o2);
+    ask('story>', function (v) {
+      if (v === 'q') { out([[{ t: L('ストーリーを中断しました。', 'Story paused.'), c: 'dim' }], '']); return; }
+      tuiRun(storyCfg(ev), { title: t(ev.title), subtitle: goalText(ev.goal, ev.track), cmd: 'story ' + ev.id,
+                             onResult: function (r) { return applyResult({ kind: 'story', ev: ev, track: ev.track }, r); } }, function (r, sum) {
+        if (!sum) return;
+        if (sum.success) {
+          if (ev.post) out(sceneLines(ev.post).concat(['']));
+          if (ev.id === '5b') out([[{ t: 'THE END — Thank you for playing.', c: 'accent bold' }], [{ t: L('番外編が開放されました: ', 'Extra chapter unlocked: '), c: 'dim' }, link('race story', 'race story')], '']);
+          out([[{ t: L('Enter で次の話へ / q でやめる', 'Enter for the next episode / q to stop'), c: 'dim' }]]);
+          ask('story>', function (v2) { if (v2 !== 'q') tuiStory(); });
+        } else {
+          out([[{ t: L('Enter でリトライ / q でやめる', 'Enter to retry / q to stop'), c: 'dim' }]]);
+          ask('story>', function (v2) { if (v2 !== 'q') tuiStory(ev.id); });
+        }
+      });
+    });
+  }
+
+  function tuiCup(cupId) {
+    var s = R.load();
+    var cup = R.CUPS.filter(function (c) { return c.id === cupId; })[0];
+    if (!cup) {
+      var o = TB.head(L('グランプリ', 'Grand Prix'));
+      R.CUPS.forEach(function (c) {
+        var un = R.cupUnlocked(s, c);
+        o.push([{ t: '  ' }, un ? link(t(c.name), 'race gp ' + c.id) : { t: '🔒 ' + t(c.name), c: 'dim' }, { t: '  ' + c.tracks.map(trackName).join(' / ') + (s.cups[c.id] ? '  🏅' + t(R.MEDALS[s.cups[c.id]]) : ''), c: 'dim' }]);
+      });
+      return o.concat(['']);
+    }
+    if (!R.cupUnlocked(s, cup)) return [[{ t: L('まだ開放されていません。', 'Locked.'), c: 'err' }]];
+    var st = Cup(cupId);
+    function next() {
+      out(['', [{ t: t(cup.name) + L(' 第 ', ' round ') + (st.idx + 1) + L(' 戦: ', ': ') + trackName(cup.tracks[st.idx]), c: 'accent-2 bold' }]]);
+      tuiRun(st.cfg(), { title: t(cup.name), cmd: 'gp ' + cupId, onResult: st.result }, function (r) {
+        if (!r) return;
+        out([[{ t: L('選手権順位', 'Standings'), c: 'accent-2' }]].concat(st.table().map(function (e, i) { return { row: [(i + 1) + '. ' + (e.n === 'YOU' ? L('あなた', 'YOU') : e.n), e.p + ' pt'] }; })));
+        if (st.over()) {
+          var f = st.finish();
+          out([[{ t: f.pos === 1 ? '🏆 ' + L('総合優勝！', 'CHAMPION!') : L('総合 ' + f.pos + ' 位', 'Overall P' + f.pos), c: 'accent bold' }], f.bonus ? [{ t: L('ボーナス +', 'Bonus +') + yen(f.bonus), c: 'warn' }] : '', '']);
+          return;
+        }
+        out([[{ t: L('Enter で次のレース / q でやめる', 'Enter for the next race / q to stop'), c: 'dim' }]]);
+        ask('gp>', function (v) { if (v !== 'q') next(); });
+      });
+    }
+    next();
+    return [];
+  }
+
+  function tuiWorld(job, start) {
+    if (start && !R.NODES[start]) start = null;
+    var w = World({ job: job, start: start || 'hm_eki' });
+    out([[{ t: L('分岐では車線（左・中央・右）で行き先を選びます。止まって r で U ターン。q で終了。', 'Lanes pick the exit at forks. Stop and press r to U-turn. q to finish.'), c: 'dim' }]]);
+    tuiRun(w.first(), { title: job ? t(R.JOBS[job].name) : L('オープンワールド', 'Open world'), chain: w.next, world: w, cmd: job ? 'job ' + job : 'world' }, null);
+    return [];
+  }
+
+  function tuiSingle(cfg, ctx, cmd, title) {
+    tuiRun(cfg, { title: title, cmd: cmd, onResult: function (r) { return applyResult(ctx, r); } }, function (r) {
+      if (!r) return;
+      out([[{ t: L('もう一度: ', 'Again: '), c: 'dim' }, link('race ' + cmd, 'race ' + cmd), { t: '   ' }, link(L('メニュー', 'menu'), 'race')], '']);
+    });
+    return [];
+  }
+
+  /* =====================================================================
+     コマンド
+     ===================================================================== */
+
+  function levelOf(args) { for (var i = 0; i < args.length; i++) if (R.LEVELS[args[i]]) return args[i]; return null; }
+  function numOf(args) { for (var i = 0; i < args.length; i++) if (/^\d+$/.test(args[i])) return parseInt(args[i], 10); return null; }
+  function trackOf(args, loopOnly) {
+    for (var i = 0; i < args.length; i++) {
+      var a = args[i];
+      if (R.TRACKS[a] && (!loopOnly || !R.TRACKS[a].touge)) return a;
+      var n = parseInt(a, 10);
+      if (n >= 1 && n <= R.ORDER.length && String(n) === a && loopOnly === 'num') return R.ORDER[n - 1];
+    }
+    return null;
+  }
+
+  function runCommand(args) {
+    var m = TB.Win ? TB.Win.modeArgs(args) : { tui: false, args: args };
+    var tui = m.tui;
+    args = m.args.map(function (x) { return x.toLowerCase(); });
+    var a = args[0] || '';
+    var rest = args.slice(1);
+    if (!tui) {
+      openApp(args.join(' ') || 'title');
+      return [[{ t: L('TUI RACING を開きました（↑↓ で選んで Enter）。m で文字版に切り替えられます。', 'Opened TUI RACING (arrows + Enter). Press m for text mode.'), c: 'dim' }]];
+    }
+    var s = R.load();
+    switch (a) {
+      case '': return tuiMenu();
+      case 'tracks': return tuiTracks();
+      case 'stats': case 'records': return tuiStats();
+      case 'garage': case 'shop': case 'cars': return tuiGarage();
+      case 'story': tuiStory(rest[0]); return [];
+      case 'world': return tuiWorld(null, rest[0]);
+      case 'job': case 'jobs': case 'taxi':
+        var job = a === 'taxi' ? 'taxi' : rest[0];
+        if (!R.JOBS[job]) return [[{ t: L('アルバイト: ', 'Jobs: '), c: 'dim' }, link('taxi', 'race job taxi'), { t: ' ' }, link('delivery', 'race job delivery'), { t: ' ' }, link('food', 'race job food')]];
+        return tuiWorld(job, a === 'taxi' ? rest[0] : rest[1]);
+      case 'gp': case 'career': return tuiCup(rest[0]);
+      case 'level':
+        if (R.LEVELS[rest[0]]) { R.edit(function (x) { x.level = rest[0]; }); return [[{ t: L('難易度: ', 'Level: ') + t(R.LEVEL_NAMES[rest[0]]), c: 'accent' }]]; }
+        return [[{ t: 'race level easy|normal|hard', c: 'warn' }]];
+      case 'touge':
+        var tt = trackOf(rest) || 'akimine';
+        if (!R.TRACKS[tt].touge) tt = 'akimine';
+        var rv = R.TOUGE_DRIVERS.filter(function (d) { return rest.indexOf(d.name.toLowerCase()) >= 0; })[0] || U.pick(R.TOUGE_DRIVERS);
+        return tuiSingle(baseCfg({ track: tt, mode: 'touge', field: [{ name: rv.name, color: rv.color, body: rv.body, ai: rv.ai, skill: 0.95, pace: Math.max(0.86, carPace()) }] }),
+                         { kind: 'touge', track: tt }, 'touge ' + tt + ' ' + rv.name.toLowerCase(), L('峠バトル vs ', 'Touge vs ') + rv.name);
+      case 'time':
+        var tr = trackOf(rest) || 'coast';
+        return tuiSingle(baseCfg({ track: tr, mode: 'time' }), { kind: 'time', track: tr }, 'time ' + tr, L('タイムアタック', 'Time attack'));
+      case 'elim': case 'duel': case 'arcade': case 'chase': case 'traffic':
+        var tr2 = trackOf(rest, true) || { elim: 'desert', duel: 'coast', arcade: 'city', chase: 'highway', traffic: 'tomei' }[a];
+        var cpv = carPace(s), bossId = rest.filter(function (x) { return R.BOSSES[x] && s.bosses[x]; })[0];
+        var field = a === 'elim' ? R.makeField(5, cpv) : a === 'duel' ? [bossId ? R.boss(bossId, Math.max(cpv, 0.9)) : { name: 'MONO', color: '#eee', body: 'formula', ai: 'technician', skill: 1, pace: cpv }]
+                    : a === 'chase' ? [R.boss('phantom', 0.88)] : [];
+        return tuiSingle(baseCfg({ track: tr2, mode: a, field: field, carId: a === 'chase' ? 'police' : null, level: levelOf(rest) }), { kind: 'challenge', track: tr2 }, a + ' ' + tr2, t(R.MODES[a].name));
+      case 'mini':
+        var k = R.MINIS[rest[0]] ? rest[0] : 'gymkhana';
+        return tuiSingle(miniCfg(k), { kind: 'mini', track: MINI_SPEC[k] }, 'mini ' + k, t(R.MINIS[k].name));
+      case 'coins':
+        return tuiSingle(miniCfg('coins'), { kind: 'mini', track: 'hamamatsu' }, 'coins', t(R.CASUAL.coins.name));
+      case 'party': case 'quick': default:
+        var id = a === 'quick' || a === 'party' ? (trackOf(rest) || 'coast') : trackOf(args, 'num');
+        if (!id) return [[{ t: L('そのコース・モードはありません: ', 'Unknown track or mode: ') + a, c: 'err' }]].concat(tuiMenu());
+        var laps = numOf(a === 'quick' || a === 'party' ? rest : args.slice(1)) || (R.TRACKS[id].laps || 2);
+        var lv = levelOf(args) || s.level;
+        var wx = args.filter(function (x) { return R.WEATHERS[x]; })[0] || 'auto';
+        var mir = args.indexOf('mirror') >= 0;
+        var casual = a === 'party';
+        var pool = R.TRACKS[id].touge ? R.TOUGE_DRIVERS : R.DRIVERS;
+        return tuiSingle(baseCfg({ track: id, laps: clamp(laps, 1, 9), level: lv, weather: wx, mirror: mir, casual: casual, field: R.makeField(Math.min(7, pool.length), carPace(s), pool) }),
+                         { kind: casual ? 'party' : 'quick', track: id, mirror: mir, level: lv }, (casual ? 'party ' : 'quick ') + id + ' ' + laps + ' ' + lv + ' ' + wx + (mir ? ' mirror' : ''),
+                         trackName(id));
+    }
+  }
+
+  def('race', {
+    group: 'game',
+    usage: 'race [gui|tui] [story|world|job|gp|quick|touge|time|elim|duel|arcade|chase|traffic|mini|party|coins|garage|stats|tracks] …',
+    desc: { ja: '本格レースゲーム。物語・オープンワールド（浜松〜名古屋）・アルバイト・峠・GP・ミニゲーム', en: 'A full racing game: story, open world, jobs, touge, GP and mini games' },
+    run: runCommand
+  });
+  def('tuirace', {
+    group: 'game',
+    usage: 'tuirace [race と同じ引数]',
+    desc: { ja: 'レースの文字（TUI）版', en: 'the text-mode racer' },
+    run: function (args) { return runCommand(['tui'].concat(args.length ? args : [])); }
+  });
+  def('taxi', {
+    group: 'game',
+    usage: 'taxi [出発地]',
+    desc: { ja: 'タクシーのアルバイト（race job taxi と同じ）', en: 'the taxi job (same as race job taxi)' },
+    run: function (args) { return runCommand(['job', 'taxi'].concat(args)); }
+  });
+  TB.alias.racing = 'race';
+  TB.alias.drive = 'race';
+  TB.alias['レース'] = 'race';
+  TB.alias.openworld = 'race world';
+  TB.alias['タクシー'] = 'taxi';
+  TB.alias.touge = 'race touge';
+
+  R.openApp = openApp;
+})();

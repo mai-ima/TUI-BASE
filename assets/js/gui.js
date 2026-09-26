@@ -137,7 +137,7 @@
   }
 
   TB.Sfx = {
-    play: play, engine: engine, enabled: enabled, volume: volume,
+    play: play, engine: engine, enabled: enabled, volume: volume, ctx: audio,
     set: function (on) { TB.store.set('sound', on ? '1' : '0'); },
     setVolume: function (v) { TB.store.set('vol', String(Math.max(0, Math.min(0.25, v)))); }
   };

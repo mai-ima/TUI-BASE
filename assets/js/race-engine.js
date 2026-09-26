@@ -1,0 +1,2652 @@
+/*
+ * race-engine.js — TUI RACING の心臓部。走らせる・描く。
+ *
+ *   R.Session(cfg)    … 1 回のレース（物理・敵の頭脳・各モードの決まり）
+ *     .update(dt) / .render(g) … GUI（Canvas）で描く
+ *     .renderText(view, status) … TUI（文字）で描く
+ *   R.runText(cfg, done) … ターミナルの中で 1 レース走らせる（文字版の器）
+ *   R.drawCar / R.drawPortrait / R.drawPreview … メニューでも使う絵
+ *
+ * 描き方は昔ながらの「道路を区間に切り、奥から手前へ台形を投影する」方式。
+ */
+(function () {
+  'use strict';
+
+  var TB = window.TB;
+  var R = TB.Race;
+  var U = R.util;
+  var L = U.L, clamp = U.clamp, lerp = U.lerp, sfx = U.sfx, fmt = U.fmt;
+
+  function easeIn(a, b, p) { return a + (b - a) * Math.pow(p, 2); }
+  function easeInOut(a, b, p) { return a + (b - a) * ((-Math.cos(p * Math.PI) / 2) + 0.5); }
+
+  /* ---------- 定数 ------------------------------------------------------ */
+
+  var SEG = 200;             // 1 区間の長さ
+  var RUMBLE = 3;            // 縁石の縞の長さ（区間数）
+  var ROAD_W = 2000;         // 道幅の半分
+  var LANES = 3;
+  var CAM_H = 1000;
+  var DEPTH = 1 / Math.tan((100 / 2) * Math.PI / 180);   // 視野角 100 度
+  var DRAW = 220;            // 何区間先まで描くか
+  var MAX = SEG * 60;        // 基準の最高速（1 秒に 60 区間）
+  var CENTRIFUGAL = 0.3;
+  var PLAYER_Z = CAM_H * DEPTH;   // カメラから自車までの距離
+  var CAR_W = 0.13;          // 車幅の半分（道幅の半分に対する比）
+  var OVERLAP = CAR_W * 2 * 0.9;
+  var TUNNEL_H = 2600;
+  var MPS = 280 / 3.6 / 60;
+  var BRAKE = MAX * 0.6, COAST = MAX / 8;   // ブレーキ・エンジンブレーキの減速  // 1 区間は約 1.3 m（最高速 280km/h で 1 秒 60 区間）
+  var W = 640, H = 360;      // 今描いている画面の大きさ（描く前に設定する）
+
+  R.SEG = SEG; R.MAX = MAX;
+
+  /* =====================================================================
+     コースを組み立てる
+     ===================================================================== */
+
+  function builder() {
+    var segs = [];
+    function lastY() { return segs.length ? segs[segs.length - 1].p2.world.y : 0; }
+    function add(curve, y) {
+      var n = segs.length;
+      segs.push({
+        index: n, curve: curve, sprites: [], objs: [],
+        p1: { world: { y: lastY(), z: n * SEG }, camera: {}, screen: {} },
+        p2: { world: { y: y, z: (n + 1) * SEG }, camera: {}, screen: {} }
+      });
+    }
+    function road(enter, hold, leave, curve, hill) {
+      var startY = lastY(), endY = startY + (hill || 0) * SEG, total = enter + hold + leave, i;
+      for (i = 0; i < enter; i++) add(easeIn(0, curve, i / enter), easeInOut(startY, endY, i / total));
+      for (i = 0; i < hold; i++) add(curve, easeInOut(startY, endY, (enter + i) / total));
+      for (i = 0; i < leave; i++) add(easeInOut(curve, 0, i / leave), easeInOut(startY, endY, (enter + hold + i) / total));
+    }
+    var b = {
+      segs: segs,
+      road: road,
+      straight: function (n) { road(n, n, n, 0, 0); },
+      curve: function (n, c, h) { road(n, n, n, c, h || 0); },
+      hill: function (n, h) { road(n, n, n, 0, h); },
+      bumps: function () {
+        road(10, 10, 10, 0, 5); road(10, 10, 10, 0, -2); road(10, 10, 10, 0, -5);
+        road(10, 10, 10, 0, 8); road(10, 10, 10, 0, 5); road(10, 10, 10, 0, -7);
+      },
+      sCurves: function (c) {
+        road(30, 30, 30, -c, 0); road(30, 30, 30, c, 10); road(30, 30, 30, c, 0);
+        road(30, 30, 30, -c, 0); road(30, 30, 30, -c, -10);
+      },
+      tunnel: function (fn) {
+        var from = segs.length;
+        fn();
+        for (var i = from; i < segs.length; i++) segs[i].tunnel = true;
+      },
+      finish: function () { road(60, 40, 60, 0, -lastY() / SEG); }
+    };
+    return b;
+  }
+
+  // 同じコースでは毎回同じ場所に飾りが並ぶよう、決まった乱数を使う
+  function seeded(seed) {
+    var s = seed % 2147483647; if (s <= 0) s += 2147483646;
+    return function () { s = s * 16807 % 2147483647; return (s - 1) / 2147483646; };
+  }
+
+  function shade(hex, f) {
+    if (hex.charAt(0) !== '#') return hex;
+    var n = parseInt(hex.length === 4 ? hex.replace(/#(.)(.)(.)/, '$1$1$2$2$3$3') : hex.slice(1), 16);
+    var r = clamp(Math.round(((n >> 16) & 255) * f), 0, 255);
+    var gg = clamp(Math.round(((n >> 8) & 255) * f), 0, 255);
+    var b = clamp(Math.round((n & 255) * f), 0, 255);
+    return 'rgb(' + r + ',' + gg + ',' + b + ')';
+  }
+  function mix(a, b, t) {
+    var x = parseInt(a.slice(1), 16), y = parseInt(b.slice(1), 16);
+    var r = Math.round(((x >> 16) & 255) * (1 - t) + ((y >> 16) & 255) * t), gg = Math.round(((x >> 8) & 255) * (1 - t) + ((y >> 8) & 255) * t), bb = Math.round((x & 255) * (1 - t) + (y & 255) * t);
+    return '#' + ((1 << 24) + (r << 16) + (gg << 8) + bb).toString(16).slice(1);
+  }
+  function rgba(hex, a) {
+    var n = parseInt(hex.slice(1), 16);
+    return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')';
+  }
+
+  function buildTrack(id, mirror, weather) {
+    var spec = typeof id === 'string' ? R.TRACKS[id] : id;
+    id = spec.id || (typeof id === 'string' ? id : 'custom');
+    var b = builder();
+    for (var rp = 0; rp < (spec.reps || 1); rp++) spec.build(b);
+    var segs = b.segs, pal = spec.pal, wet = weather === 'rain' || weather === 'snow';
+    var rand = seeded(id.length * 7919 + id.charCodeAt(0) * 131 + id.charCodeAt(1));
+
+    segs.forEach(function (s, i) {
+      if (mirror) s.curve = -s.curve;
+      // 上り坂は明るく、下り坂は暗く
+      var slope = (s.p2.world.y - s.p1.world.y) / SEG;
+      var f = clamp(1 + slope * 0.9, 0.8, 1.16);
+      var alt = Math.floor(i / RUMBLE) % 2;
+      s.alt = alt;
+      s.cGrass = s.tunnel ? shade(pal.wall || '#333', alt ? 0.9 : 0.8) : shade(pal.grass[alt], f);
+      s.cRoad = shade(pal.road[alt], f * (s.tunnel ? 0.8 : 1) * (wet ? 0.84 : 1));
+      s.cRumble = spec.curbs ? shade(pal.rumble[alt], f) : shade(pal.road[0], f * (alt ? 1.18 : 1.14));
+      s.rails = !!spec.rails;
+    });
+
+    // 路肩の飾り。カーブの外側には矢印看板
+    for (var i = 20; i < segs.length - 5; i++) {
+      var seg = segs[i];
+      if (seg.tunnel) { if (i % 6 === 0) seg.sprites.push({ kind: 'tlight', offset: 0 }); continue; }
+      if (Math.abs(seg.curve) > 2.5 && i % 12 === 0) {
+        var out = seg.curve > 0 ? -1 : 1;
+        seg.sprites.push({ kind: 'chevron', offset: out * 1.35, dir: seg.curve > 0 ? 1 : -1 });
+      } else if (i % 9 === 0 || i % 14 === 0) {
+        var kind = spec.deco[(i * 7) % spec.deco.length];
+        var side = (i % 2 ? 1 : -1);
+        if (spec.water) side = spec.water === 'left' ? 1 : -1;
+        var big = kind === 'building' || kind === 'mesa' || kind === 'grandstand' || kind === 'crane';
+        var off = side * (big ? 2.4 + (i % 3) * 0.5 : 1.35 + (i % 5) * 0.28);
+        seg.sprites.push({ kind: kind, offset: off, seed: i });
+      }
+      if (spec.neon && i % 30 === 0) seg.sprites.push({ kind: 'arch', offset: 0 });
+    }
+
+    // 道の上の障害物・加速パネル
+    var hz = spec.hazards || {};
+    function place(kind, n) {
+      var span = Math.max(20, segs.length - 140);
+      for (var k = 0; k < n; k++) {
+        var at = 70 + Math.floor(span * (k + rand() * 0.6) / n);
+        var sg = segs[at];
+        if (!sg || sg.tunnel) continue;
+        if (kind === 'cone') {
+          var o = (rand() < 0.5 ? -1 : 1) * (0.35 + rand() * 0.4);
+          for (var c = 0; c < 3; c++) segs[at + c * 2].objs.push({ kind: 'cone', offset: o + c * 0.08 * (o > 0 ? -1 : 1) });
+        } else if (kind === 'coin') {
+          var lane = [-0.6, 0, 0.6][Math.floor(rand() * 3)];
+          for (var c2 = 0; c2 < 5; c2++) if (segs[at + c2 * 3]) segs[at + c2 * 3].objs.push({ kind: 'coin', offset: lane });
+        } else if (kind === 'pad') {
+          sg.objs.push({ kind: 'pad', offset: [-0.55, 0, 0.55][Math.floor(rand() * 3)] });
+        } else {
+          sg.objs.push({ kind: kind, offset: (rand() - 0.5) * 1.4 });
+        }
+      }
+    }
+    Object.keys(hz).forEach(function (k) { place(k, hz[k]); });
+
+    // 名所（ランドマーク）
+    (spec.landmarks || []).forEach(function (m, j, arr) {
+      var at = Math.floor(segs.length * (j + 0.6) / (arr.length + 0.5));
+      var side2 = spec.water === 'left' ? 1 : spec.water === 'right' ? -1 : (j % 2 ? 1 : -1);
+      if (segs[at] && !segs[at].tunnel) segs[at].sprites.push({ kind: m, offset: side2 * (m === 'torii' ? 1.5 : 3.2), seed: j + 3 });
+    });
+    if (spec.endMark && segs.length > 260) segs[segs.length - 230].sprites.push({ kind: spec.endMark, offset: spec.water === 'left' ? 3.2 : -3.2, seed: 7 });
+    if (spec.startMark && segs[10]) segs[10].sprites.push({ kind: spec.startMark, offset: spec.water === 'left' ? 3 : -3, seed: 5 });
+    if (spec.banner && segs[5]) segs[5].sprites.push({ kind: 'banner', offset: 0, text: spec.banner });
+    if (spec.fork) segs[Math.max(0, segs.length - 70)].sprites.push({ kind: 'fork', offset: 0, texts: spec.fork });
+    if (spec.fork) segs[Math.max(0, segs.length - 140)].sprites.push({ kind: 'fork', offset: 0, texts: spec.fork });
+    if (spec.stopZone) for (var z = spec.stopZone[0]; z <= spec.stopZone[1]; z++) segs[z].stopZone = true;
+    if ((spec.touge || spec.p2p) && !spec.finishAt) spec.finishAt = segs.length - 150;
+    if (spec.finishAt) { segs[spec.finishAt].finishLine = true; segs[spec.finishAt].sprites.push({ kind: 'gantry', offset: 0 }); }
+    if (!spec.noFinish && !spec.touge && !spec.p2p) {
+      segs[2].sprites.push({ kind: 'gantry', offset: 0 });
+      for (var k = 0; k < 3; k++) segs[k].finishLine = true;
+    }
+
+    // ミニマップ用の道筋（一周でちょうど 360 度回るよう補正）
+    var heading = 0, x = 0, y = 0, pts = [];
+    var total = segs.reduce(function (a, s) { return a + s.curve; }, 0);
+    var absTotal = segs.reduce(function (a, s) { return a + Math.abs(s.curve); }, 0) || 1;
+    var turn = (3.2 * Math.PI) / absTotal;
+    var bias = (2 * Math.PI * (mirror ? -1 : 1) - total * turn) / segs.length;
+    segs.forEach(function (s) {
+      heading += s.curve * turn + bias;
+      x += Math.sin(heading); y -= Math.cos(heading);
+      pts.push([x, y]);
+    });
+    var ex = pts[pts.length - 1][0], ey = pts[pts.length - 1][1];
+    pts = pts.map(function (p, i2) { var f = (i2 + 1) / pts.length; return [p[0] - ex * f, p[1] - ey * f]; });
+    var minx = Infinity, maxx = -Infinity, miny = Infinity, maxy = -Infinity;
+    pts.forEach(function (p) { minx = Math.min(minx, p[0]); maxx = Math.max(maxx, p[0]); miny = Math.min(miny, p[1]); maxy = Math.max(maxy, p[1]); });
+    var sc = 1 / Math.max(maxx - minx, maxy - miny);
+    var ox = (1 - (maxx - minx) * sc) / 2, oy = (1 - (maxy - miny) * sc) / 2;
+    var map = pts.map(function (p) { return [(p[0] - minx) * sc + ox, (p[1] - miny) * sc + oy]; });
+
+    segs.forEach(function (s) { s.waterSide = spec.water || null; });
+    return { id: id, spec: spec, pal: pal, segs: segs, length: segs.length * SEG, map: map };
+  }
+  R.buildTrack = buildTrack;
+
+  /* =====================================================================
+     描画の部品（GUI）
+     ===================================================================== */
+
+  function project(p, camX, camY, camZ) {
+    p.camera.x = (p.world.x || 0) - camX;
+    p.camera.y = (p.world.y || 0) - camY;
+    p.camera.z = (p.world.z || 0) - camZ;
+    p.screen.scale = DEPTH / p.camera.z;
+    p.screen.x = Math.round((W / 2) + (p.screen.scale * p.camera.x * W / 2));
+    p.screen.y = Math.round((H / 2) - (p.screen.scale * p.camera.y * H / 2));
+    p.screen.w = Math.round(p.screen.scale * ROAD_W * W / 2);
+  }
+
+  function poly(g, x1, y1, x2, y2, x3, y3, x4, y4, color) {
+    g.fillStyle = color;
+    g.beginPath();
+    g.moveTo(x1, y1); g.lineTo(x2, y2); g.lineTo(x3, y3); g.lineTo(x4, y4);
+    g.closePath();
+    g.fill();
+  }
+  function circle(g, x, y, r, color) { g.fillStyle = color; g.beginPath(); g.arc(x, y, Math.max(0.5, r), 0, Math.PI * 2); g.fill(); }
+
+  /* ---------- 車（後ろから見た姿） ---------- */
+
+  var BODIES = {
+    kei: { h: 0.8, body: 0.52, cab: [0.4, 0.34], top: 0.96, round: 1 },
+    hatch: { h: 0.64, body: 0.58, cab: [0.4, 0.3], top: 0.97 },
+    sedan: { h: 0.56, body: 0.64, cab: [0.34, 0.26], top: 0.98 },
+    rally: { h: 0.66, body: 0.6, cab: [0.38, 0.3], top: 0.94, rack: 1, flaps: 1, wing: 0.06 },
+    muscle: { h: 0.52, body: 0.62, cab: [0.32, 0.24], top: 0.98, stripes: 1, wide: 1.04 },
+    gt: { h: 0.5, body: 0.62, cab: [0.32, 0.22], top: 0.96, wing: 0.12 },
+    ae86: { h: 0.62, body: 0.58, cab: [0.4, 0.33], top: 0.95, panda: 1 },
+    s13: { h: 0.52, body: 0.62, cab: [0.33, 0.24], top: 0.96 },
+    fc: { h: 0.5, body: 0.6, cab: [0.34, 0.22], top: 0.95, lamps: 'bar', wing: 0.05 },
+    fd: { h: 0.47, body: 0.6, cab: [0.3, 0.18], top: 0.96, lamps: 'round2', wing: 0.06 },
+    r32: { h: 0.52, body: 0.62, cab: [0.33, 0.25], top: 0.97, lamps: 'quad', wing: 0.05 },
+    gc8: { h: 0.56, body: 0.64, cab: [0.34, 0.26], top: 0.98, wing: 0.12 },
+    evo: { h: 0.56, body: 0.64, cab: [0.34, 0.26], top: 0.98, wing: 0.2 },
+    zn8: { h: 0.5, body: 0.62, cab: [0.32, 0.2], top: 0.96, wing: 0.04 },
+    rr: { h: 0.46, body: 0.6, cab: [0.3, 0.16], top: 0.98, strip: 1, wing: 0.08, wide: 1.04 },
+    wedge: { h: 0.38, body: 0.62, cab: [0.26, 0.14], top: 0.98, strip: 1, wing: 0.1, wide: 1.08 },
+    classic: { h: 0.5, body: 0.6, cab: [0.3, 0.2], top: 0.96, lamps: 'round2', chrome: 1 },
+    suv: { h: 0.82, body: 0.56, cab: [0.44, 0.4], top: 0.96, spare: 1 },
+    minivan: { h: 0.9, body: 0.5, cab: [0.46, 0.42], top: 0.97 },
+    ev: { h: 0.6, body: 0.6, cab: [0.38, 0.3], top: 0.96, strip: 1 },
+    pickup: { h: 0.7, body: 0.62, cab: [0.36, 0.3], top: 0.97, bed: 1 },
+    keitra: { h: 0.78, body: 0.5, cab: [0.36, 0.32], top: 0.94, bed: 1, round: 1 },
+    kart: { h: 0.5, kart: 1 },
+    buggy: { h: 0.62, buggy: 1 },
+    tractor: { h: 0.95, tractor: 1 },
+    monster: { h: 1.25, monster: 1, wm: 1.3 },
+    trike: { h: 0.8, body: 0.55, cab: [0.3, 0.26], top: 0.95, round: 1 },
+    limo: { h: 0.52, body: 0.64, cab: [0.34, 0.26], top: 0.97, chrome: 1 },
+    ambulance: { h: 1.0, box: 1, wm: 1.1, cross: 1, bar: 1 },
+    fire: { h: 1.1, box: 1, wm: 1.25, ladder: 1, bar: 1 },
+    camper: { h: 1.1, box: 1, wm: 1.2, windows: 1, spare: 1 },
+    taxi: { h: 0.58, body: 0.62, cab: [0.34, 0.26], top: 0.94, taxi: 1 },
+    police: { h: 0.58, body: 0.62, cab: [0.34, 0.26], top: 0.94, bar: 1 },
+    super: { h: 0.42, body: 0.62, cab: [0.3, 0.18], top: 0.98, wing: 0.16, wide: 1.06, strip: 1 },
+    formula: { h: 0.46, open: 1, wide: 1.02 },
+    proto: { h: 0.46, body: 0.62, cab: [0.26, 0.16], top: 0.98, wing: 0.2, fin: 1, strip: 1, wide: 1.05 },
+    van: { h: 1.0, box: 1, wm: 1.1 },
+    truck: { h: 1.15, box: 1, wm: 1.25, ribs: 1 },
+    bus: { h: 1.2, box: 1, wm: 1.3, windows: 1 }
+  };
+  R.BODIES = BODIES;
+  function bodyWm(body) { var B = BODIES[body] || BODIES.sedan; return (B.wm || 1) * (B.wide || 1); }
+
+  function drawCar(g, x, y, w, color, body, opt) {
+    opt = opt || {};
+    var B = BODIES[body] || BODIES.sedan;
+    w *= (B.wide || 1) * (B.wm || 1);
+    var h = w * B.h, lean = (opt.lean || 0) * w * 0.05;
+    var dark = shade(color, 0.55);
+    g.fillStyle = 'rgba(0,0,0,.28)';
+    g.beginPath(); g.ellipse(x, y - 1, w * 0.64, Math.max(1, h * 0.12), 0, 0, Math.PI * 2); g.fill();
+    g.fillStyle = 'rgba(0,0,0,.45)';
+    g.beginPath(); g.ellipse(x, y - 1, w * 0.52, Math.max(1, h * 0.06), 0, 0, Math.PI * 2); g.fill();
+
+    if (B.open) { drawFormula(g, x, y, w, h, color, opt); return; }
+    if (B.kart || B.buggy || B.tractor || B.monster) { drawFun(g, x, y, w, h, color, B, opt); return; }
+
+    // タイヤ
+    var tw = w * 0.17, th = h * (B.box ? 0.22 : 0.32);
+    g.fillStyle = '#111';
+    g.fillRect(x - w * 0.5, y - th, tw, th);
+    g.fillRect(x + w * 0.5 - tw, y - th, tw, th);
+    if (w > 30) {
+      g.fillStyle = '#333';
+      g.fillRect(x - w * 0.5 + tw * 0.25, y - th * 0.8, tw * 0.5, th * 0.5);
+      g.fillRect(x + w * 0.5 - tw * 0.75, y - th * 0.8, tw * 0.5, th * 0.5);
+    }
+
+    if (B.box) {
+      // 箱型（バン・トラック・バス）
+      var grad = g.createLinearGradient(0, y - h, 0, y - h * 0.15);
+      grad.addColorStop(0, shade(color, 1.12)); grad.addColorStop(1, shade(color, 0.72));
+      g.fillStyle = grad;
+      g.fillRect(x - w * 0.49, y - h * 0.98, w * 0.98, h * 0.8);
+      if (B.ribs && w > 16) {
+        g.fillStyle = 'rgba(0,0,0,.18)';
+        for (var r = 1; r < 6; r++) g.fillRect(x - w * 0.49 + w * 0.98 * r / 6, y - h * 0.96, Math.max(1, w * 0.012), h * 0.74);
+      } else if (B.windows) {
+        g.fillStyle = '#1c2433';
+        g.fillRect(x - w * 0.4, y - h * 0.9, w * 0.8, h * 0.28);
+      } else {
+        g.fillStyle = '#1c2433';
+        g.fillRect(x - w * 0.36, y - h * 0.9, w * 0.3, h * 0.24);
+        g.fillRect(x + w * 0.06, y - h * 0.9, w * 0.3, h * 0.24);
+        g.fillStyle = 'rgba(0,0,0,.3)';
+        g.fillRect(x - w * 0.005, y - h * 0.95, Math.max(1, w * 0.01), h * 0.72);
+      }
+      if (B.cross && w > 12) { g.fillStyle = '#e53935'; g.fillRect(x - w * 0.04, y - h * 0.62, w * 0.08, h * 0.2); g.fillRect(x - w * 0.1, y - h * 0.55, w * 0.2, h * 0.06); }
+      if (B.ladder) { g.fillStyle = '#cfd8dc'; for (var lr = 0; lr < 5; lr++) g.fillRect(x - w * 0.3, y - h * (0.96 + lr * 0.0), w * 0.6, Math.max(1, h * 0.02)); g.fillRect(x - w * 0.3, y - h * 1.02, w * 0.6, h * 0.04); }
+      if (B.bar) { var on2 = Math.floor((opt.t || 0) * 6) % 2; g.fillStyle = on2 ? '#ff2d2d' : '#5a1010'; g.fillRect(x - w * 0.3, y - h * 1.04, w * 0.25, h * 0.06); g.fillStyle = on2 ? '#1a2a6a' : '#2d6bff'; g.fillRect(x + w * 0.05, y - h * 1.04, w * 0.25, h * 0.06); }
+      g.fillStyle = opt.brake ? '#ff3b3b' : '#9e1f1f';
+      g.fillRect(x - w * 0.47, y - h * 0.36, w * 0.1, h * 0.1);
+      g.fillRect(x + w * 0.37, y - h * 0.36, w * 0.1, h * 0.1);
+      g.fillStyle = dark;
+      g.fillRect(x - w * 0.49, y - h * 0.22, w * 0.98, h * 0.06);
+      labelCar(g, x, y, w, h, opt);
+      return;
+    }
+
+    // 下半分の車体
+    var gr = g.createLinearGradient(0, y - h * B.body, 0, y - h * 0.2);
+    gr.addColorStop(0, shade(color, 1.16)); gr.addColorStop(0.5, color); gr.addColorStop(1, shade(color, 0.68));
+    g.fillStyle = gr;
+    g.fillRect(x - w * 0.48, y - h * B.body, w * 0.96, h * (B.body - 0.2));
+    if (B.panda) { g.fillStyle = '#15171a'; g.fillRect(x - w * 0.48, y - h * 0.4, w * 0.96, h * 0.2); }
+    if (B.chrome) { g.fillStyle = '#d7dce2'; g.fillRect(x - w * 0.48, y - h * 0.3, w * 0.96, h * 0.05); }
+    if (B.bed) { g.fillStyle = shade(color, 0.6); g.fillRect(x - w * 0.44, y - h * B.body - h * 0.02, w * 0.88, h * 0.05); }
+    if (B.spare && w > 14) circle(g, x, y - h * (B.body - 0.12), h * 0.14, '#1a1a1a');
+    if (w > 20) { g.fillStyle = 'rgba(255,255,255,.22)'; g.fillRect(x - w * 0.46, y - h * B.body, w * 0.92, Math.max(1, h * 0.025)); }
+    if (B.flaps) { g.fillStyle = '#222'; g.fillRect(x - w * 0.5, y - h * 0.24, tw, h * 0.1); g.fillRect(x + w * 0.5 - tw, y - h * 0.24, tw, h * 0.1); }
+
+    // 屋根と後ろの窓
+    var cab = B.cab, bt = y - h * B.body, tp = y - h * B.top;
+    var cabColor = body === 'police' ? '#f2f2f2' : shade(color, 0.8);
+    poly(g, x - w * cab[0] + lean, bt, x + w * cab[0] + lean, bt, x + w * cab[1] + lean, tp, x - w * cab[1] + lean, tp, cabColor);
+    var ib = bt - h * 0.04, it = tp + h * 0.05;
+    var wg = g.createLinearGradient(0, it, 0, ib);
+    wg.addColorStop(0, '#46546a'); wg.addColorStop(0.45, '#1c2433'); wg.addColorStop(1, '#0e131c');
+    poly(g, x - w * (cab[0] - 0.06) + lean, ib, x + w * (cab[0] - 0.06) + lean, ib, x + w * (cab[1] - 0.05) + lean, it, x - w * (cab[1] - 0.05) + lean, it, wg);
+    if (w > 24) {
+      g.fillStyle = 'rgba(255,255,255,.14)';
+      poly(g, x - w * (cab[0] - 0.08) + lean, ib, x - w * (cab[0] - 0.16) + lean, ib, x - w * (cab[1] - 0.12) + lean, it, x - w * (cab[1] - 0.07) + lean, it, 'rgba(255,255,255,.14)');
+    }
+    if (B.stripes) {
+      g.fillStyle = 'rgba(255,255,255,.85)';
+      g.fillRect(x - w * 0.1, bt, w * 0.07, h * (B.body - 0.22));
+      g.fillRect(x + w * 0.03, bt, w * 0.07, h * (B.body - 0.22));
+    }
+    if (B.rack) { g.fillStyle = '#222'; g.fillRect(x - w * 0.24 + lean, tp - h * 0.05, w * 0.48, h * 0.04); }
+    if (B.fin) { g.fillStyle = shade(color, 0.6); g.fillRect(x - w * 0.015 + lean, tp - h * 0.22, Math.max(1, w * 0.03), h * 0.26); }
+    if (B.taxi) {
+      g.fillStyle = '#fafafa'; g.fillRect(x - w * 0.14 + lean, tp - h * 0.12, w * 0.28, h * 0.12);
+      if (w > 30) { g.fillStyle = '#222'; g.font = 'bold ' + Math.max(6, Math.round(w * 0.07)) + 'px monospace'; g.textAlign = 'center'; g.fillText('TAXI', x + lean, tp - h * 0.03); }
+    }
+    if (B.bar) {
+      var on = Math.floor((opt.t || 0) * 6) % 2;
+      g.fillStyle = on ? '#ff2d2d' : '#5a1010'; g.fillRect(x - w * 0.2 + lean, tp - h * 0.1, w * 0.2, h * 0.1);
+      g.fillStyle = on ? '#1a2a6a' : '#2d6bff'; g.fillRect(x + lean, tp - h * 0.1, w * 0.2, h * 0.1);
+      if (opt.siren && w > 20) {
+        g.fillStyle = on ? 'rgba(255,45,45,.25)' : 'rgba(45,107,255,.25)';
+        g.beginPath(); g.arc(x + lean + (on ? -w * 0.1 : w * 0.1), tp - h * 0.05, w * 0.35, 0, Math.PI * 2); g.fill();
+      }
+    }
+
+    // テールランプ
+    var ly = y - h * (B.body - 0.07), lh = h * 0.1;
+    g.fillStyle = opt.brake ? '#ff3b3b' : '#9e1f1f';
+    var lc = opt.brake ? '#ff3b3b' : '#9e1f1f';
+    if (B.lamps === 'round2') {
+      circle(g, x - w * 0.34, ly + lh * 0.5, lh * 0.62, lc); circle(g, x + w * 0.34, ly + lh * 0.5, lh * 0.62, lc);
+    } else if (B.lamps === 'quad') {
+      [-0.4, -0.27, 0.27, 0.4].forEach(function (fx) { circle(g, x + w * fx, ly + lh * 0.5, lh * 0.5, lc); });
+    } else if (B.lamps === 'bar') {
+      g.fillRect(x - w * 0.46, ly - lh * 0.1, w * 0.92, lh * 0.9);
+      g.fillStyle = 'rgba(0,0,0,.35)'; g.fillRect(x - w * 0.1, ly - lh * 0.1, w * 0.2, lh * 0.9);
+    } else if (B.strip) {
+      g.fillRect(x - w * 0.46, ly, w * 0.92, lh * 0.55);
+    } else if (B.round) {
+      circle(g, x - w * 0.36, ly + lh * 0.5, lh * 0.6, g.fillStyle); circle(g, x + w * 0.36, ly + lh * 0.5, lh * 0.6, opt.brake ? '#ff3b3b' : '#9e1f1f');
+    } else {
+      g.fillRect(x - w * 0.45, ly, w * 0.18, lh);
+      g.fillRect(x + w * 0.27, ly, w * 0.18, lh);
+    }
+    if (opt.brake && w > 24) {
+      g.fillStyle = 'rgba(255,60,60,.22)';
+      g.fillRect(x - w * 0.52, ly - lh * 0.6, w * 1.04, lh * 2.2);
+    }
+    g.fillStyle = dark;
+    g.fillRect(x - w * 0.48, y - h * 0.28, w * 0.96, h * 0.07);
+    if (w > 26) { g.fillStyle = '#e8e8e8'; g.fillRect(x - w * 0.09, y - h * 0.42, w * 0.18, h * 0.09); }
+
+    // ウイング（車体より手前）
+    if (B.wing) {
+      var wy = bt - h * (0.1 + B.wing);
+      g.fillStyle = '#1a1a1a';
+      g.fillRect(x - w * 0.3, wy, Math.max(1, w * 0.03), bt - wy);
+      g.fillRect(x + w * 0.27, wy, Math.max(1, w * 0.03), bt - wy);
+      g.fillStyle = shade(color, 0.5);
+      g.fillRect(x - w * 0.47, wy - h * 0.06, w * 0.94, h * 0.07);
+    }
+    exhaust(g, x, y, w, h, opt, [-0.2, 0.2]);
+    labelCar(g, x, y, w, h, opt);
+  }
+
+  function drawFormula(g, x, y, w, h, color, opt) {
+    var tw = w * 0.24, th = h * 0.55;
+    g.fillStyle = '#111';
+    g.fillRect(x - w * 0.5, y - th, tw, th);
+    g.fillRect(x + w * 0.5 - tw, y - th, tw, th);
+    g.fillStyle = '#2a2a2a';
+    g.fillRect(x - w * 0.5, y - th * 0.55, tw, th * 0.08);
+    g.fillRect(x + w * 0.5 - tw, y - th * 0.55, tw, th * 0.08);
+    g.fillStyle = shade(color, 0.7);
+    g.fillRect(x - w * 0.26, y - h * 0.42, w * 0.52, h * 0.16);
+    poly(g, x - w * 0.16, y - h * 0.3, x + w * 0.16, y - h * 0.3, x + w * 0.06, y - h * 0.82, x - w * 0.06, y - h * 0.82, color);
+    circle(g, x, y - h * 0.74, w * 0.07, '#ffd93d');
+    g.fillStyle = '#1c2433'; g.fillRect(x - w * 0.05, y - h * 0.76, w * 0.1, h * 0.04);
+    g.fillStyle = '#1a1a1a';
+    g.fillRect(x - w * 0.03, y - h * 1.0, w * 0.06, h * 0.4);
+    g.fillStyle = shade(color, 0.55);
+    g.fillRect(x - w * 0.44, y - h * 1.06, w * 0.88, h * 0.12);
+    g.fillStyle = '#111';
+    g.fillRect(x - w * 0.46, y - h * 1.12, w * 0.04, h * 0.3);
+    g.fillRect(x + w * 0.42, y - h * 1.12, w * 0.04, h * 0.3);
+    g.fillStyle = opt.brake ? '#ff3b3b' : '#9e1f1f';
+    g.fillRect(x - w * 0.04, y - h * 0.36, w * 0.08, h * 0.08);
+    exhaust(g, x, y, w, h, opt, [0]);
+    labelCar(g, x, y, w, h * 1.1, opt);
+  }
+
+  // お遊び車両（ゴーカート・バギー・トラクター・モンスタートラック）
+  function drawFun(g, x, y, w, h, color, B, opt) {
+    if (B.kart) {
+      g.fillStyle = '#111'; g.fillRect(x - w * 0.5, y - h * 0.5, w * 0.22, h * 0.5); g.fillRect(x + w * 0.28, y - h * 0.5, w * 0.22, h * 0.5);
+      g.fillStyle = color; g.fillRect(x - w * 0.3, y - h * 0.45, w * 0.6, h * 0.25);
+      g.fillStyle = '#333'; g.fillRect(x - w * 0.2, y - h * 0.8, w * 0.4, h * 0.36);
+      circle(g, x, y - h * 1.0, w * 0.12, '#e53935'); g.fillStyle = '#1c2433'; g.fillRect(x - w * 0.08, y - h * 1.02, w * 0.16, h * 0.06);
+    } else if (B.buggy) {
+      g.fillStyle = '#111'; g.fillRect(x - w * 0.52, y - h * 0.55, w * 0.24, h * 0.55); g.fillRect(x + w * 0.28, y - h * 0.55, w * 0.24, h * 0.55);
+      g.strokeStyle = '#333'; g.lineWidth = Math.max(1, w * 0.03);
+      g.strokeRect(x - w * 0.28, y - h * 1.0, w * 0.56, h * 0.6); g.lineWidth = 1;
+      g.fillStyle = color; g.fillRect(x - w * 0.3, y - h * 0.5, w * 0.6, h * 0.18);
+      circle(g, x, y - h * 0.75, w * 0.09, '#fdd835');
+    } else if (B.tractor) {
+      g.fillStyle = '#111'; g.fillRect(x - w * 0.56, y - h * 0.8, w * 0.3, h * 0.8); g.fillRect(x + w * 0.26, y - h * 0.8, w * 0.3, h * 0.8);
+      g.fillStyle = color; g.fillRect(x - w * 0.24, y - h * 0.62, w * 0.48, h * 0.42);
+      g.fillStyle = '#222'; g.fillRect(x - w * 0.2, y - h * 1.0, w * 0.4, h * 0.05); g.fillRect(x - w * 0.18, y - h * 1.0, w * 0.03, h * 0.4); g.fillRect(x + w * 0.15, y - h * 1.0, w * 0.03, h * 0.4);
+      g.fillStyle = '#555'; g.fillRect(x + w * 0.1, y - h * 1.1, w * 0.05, h * 0.5);
+    } else if (B.monster) {
+      g.fillStyle = '#111'; g.fillRect(x - w * 0.52, y - h * 0.5, w * 0.3, h * 0.5); g.fillRect(x + w * 0.22, y - h * 0.5, w * 0.3, h * 0.5);
+      g.fillStyle = '#777'; g.fillRect(x - w * 0.2, y - h * 0.46, w * 0.4, h * 0.06);
+      var gr = g.createLinearGradient(0, y - h, 0, y - h * 0.45); gr.addColorStop(0, shade(color, 1.2)); gr.addColorStop(1, shade(color, 0.7));
+      g.fillStyle = gr; g.fillRect(x - w * 0.42, y - h * 0.78, w * 0.84, h * 0.3);
+      poly(g, x - w * 0.3, y - h * 0.78, x + w * 0.3, y - h * 0.78, x + w * 0.22, y - h, x - w * 0.22, y - h, shade(color, 0.8));
+      g.fillStyle = '#1c2433'; g.fillRect(x - w * 0.18, y - h * 0.95, w * 0.36, h * 0.12);
+      g.fillStyle = opt.brake ? '#ff3b3b' : '#9e1f1f'; g.fillRect(x - w * 0.4, y - h * 0.72, w * 0.12, h * 0.06); g.fillRect(x + w * 0.28, y - h * 0.72, w * 0.12, h * 0.06);
+    }
+    labelCar(g, x, y, w, h, opt);
+  }
+
+  function exhaust(g, x, y, w, h, opt, xs) {
+    if (!opt.boost) return;
+    xs.forEach(function (fx) {
+      var ex = x + w * fx, ey = y - h * 0.2;
+      var len = h * (0.35 + Math.random() * 0.35);
+      poly(g, ex - w * 0.05, ey, ex + w * 0.05, ey, ex + w * 0.02, ey + len, ex - w * 0.02, ey + len, 'rgba(90,170,255,.85)');
+      poly(g, ex - w * 0.025, ey, ex + w * 0.025, ey, ex + w * 0.01, ey + len * 0.6, ex - w * 0.01, ey + len * 0.6, 'rgba(255,255,255,.9)');
+    });
+  }
+
+  function labelCar(g, x, y, w, h, opt) {
+    if (!opt.label || w < 18) return;
+    var size = clamp(Math.round(w * 0.14), 8, 13);
+    g.font = 'bold ' + size + 'px ui-monospace, monospace';
+    g.textAlign = 'center';
+    var ty = y - h * 1.12 - (opt.boss ? size : 0);
+    g.fillStyle = 'rgba(0,0,0,.6)'; g.fillText(opt.label, x + 1, ty + 1);
+    g.fillStyle = opt.boss ? '#ffd93d' : '#fff'; g.fillText(opt.label, x, ty);
+    if (opt.boss) { g.fillStyle = '#ff5252'; g.fillText('BOSS', x, ty + size); }
+  }
+  R.drawCar = drawCar;
+
+  /* ---------- 路肩の飾り ---------- */
+
+  function drawSprite(g, sp, x, y, s, night, t) {
+    var u = s * 0.12, i, k;
+    switch (sp.kind) {
+      case 'tree':
+        g.fillStyle = '#5b3a1e'; g.fillRect(x - u * 0.3, y - u * 2, u * 0.6, u * 2);
+        poly(g, x - u * 2, y - u * 1.6, x + u * 2, y - u * 1.6, x + u * 0.2, y - u * 5, x - u * 0.2, y - u * 5, '#1f6b3a');
+        poly(g, x - u * 1.5, y - u * 3.4, x + u * 1.5, y - u * 3.4, x + u * 0.1, y - u * 6.2, x - u * 0.1, y - u * 6.2, '#27804a');
+        break;
+      case 'pine': case 'snowpine':
+        g.fillStyle = '#4a2f1a'; g.fillRect(x - u * 0.25, y - u * 1.4, u * 0.5, u * 1.4);
+        for (i = 0; i < 3; i++) {
+          var by = y - u * (1.2 + i * 1.7), bw = u * (2.2 - i * 0.55);
+          poly(g, x - bw, by, x + bw, by, x + u * 0.1, by - u * 2.6, x - u * 0.1, by - u * 2.6, i % 2 ? '#1b5e20' : '#236b2a');
+          if (sp.kind === 'snowpine') poly(g, x - bw * 0.45, by - u * 1.5, x + bw * 0.45, by - u * 1.5, x + u * 0.1, by - u * 2.6, x - u * 0.1, by - u * 2.6, '#f4f8fb');
+        }
+        break;
+      case 'maple':
+        g.fillStyle = '#4e342e'; g.fillRect(x - u * 0.3, y - u * 2.2, u * 0.6, u * 2.2);
+        var mc = ['#d84315', '#ef6c00', '#c62828', '#f9a825'][sp.seed % 4];
+        circle(g, x - u * 1.1, y - u * 3, u * 1.5, shade(mc, 0.8)); circle(g, x + u * 1.1, y - u * 3.2, u * 1.5, mc); circle(g, x, y - u * 4.2, u * 1.7, shade(mc, 1.1));
+        break;
+      case 'fuji':
+        break;
+      case 'bush':
+        circle(g, x - u * 0.9, y - u * 0.8, u * 1.1, '#2e7d32'); circle(g, x + u * 0.8, y - u * 0.9, u * 1.2, '#388e3c'); circle(g, x, y - u * 1.4, u * 1.2, '#43a047');
+        break;
+      case 'palm':
+        poly(g, x - u * 0.3, y, x + u * 0.3, y, x + u * 0.8, y - u * 6, x + u * 0.3, y - u * 6, '#8a5a2b');
+        for (i = 0; i < 5; i++) {
+          var a = -Math.PI / 2 + (i - 2) * 0.7;
+          poly(g, x + u * 0.5, y - u * 6, x + u * 0.5 + Math.cos(a) * u * 3, y - u * 6 + Math.sin(a) * u * 3 + u * 1.2,
+               x + u * 0.5 + Math.cos(a) * u * 3.2, y - u * 6 + Math.sin(a) * u * 3 + u * 1.6, x + u * 0.5, y - u * 5.6, i % 2 ? '#2e9b4f' : '#38b05a');
+        }
+        break;
+      case 'cactus':
+        g.fillStyle = '#2e7d32';
+        g.fillRect(x - u * 0.4, y - u * 4, u * 0.8, u * 4);
+        g.fillRect(x - u * 1.4, y - u * 2.8, u * 0.6, u * 1.4); g.fillRect(x - u * 1.4, y - u * 2.2, u * 1.2, u * 0.5);
+        g.fillRect(x + u * 0.8, y - u * 3.4, u * 0.6, u * 1.6); g.fillRect(x + u * 0.2, y - u * 2.3, u * 1.2, u * 0.5);
+        break;
+      case 'mesa':
+        var mw = u * (8 + (sp.seed % 3) * 3), mh = u * (5 + (sp.seed % 4));
+        poly(g, x - mw, y, x + mw, y, x + mw * 0.7, y - mh, x - mw * 0.75, y - mh, '#b5562a');
+        poly(g, x - mw * 0.82, y - mh * 0.45, x + mw * 0.85, y - mh * 0.45, x + mw * 0.78, y - mh * 0.62, x - mw * 0.8, y - mh * 0.62, 'rgba(0,0,0,.14)');
+        poly(g, x - mw * 0.75, y - mh, x + mw * 0.7, y - mh, x + mw * 0.66, y - mh * 1.06, x - mw * 0.7, y - mh * 1.06, '#d9784a');
+        break;
+      case 'rock':
+        poly(g, x - u * 1.6, y, x + u * 1.5, y, x + u * 0.9, y - u * 1.4, x - u * 0.8, y - u * 1.6, '#8c8c8c');
+        poly(g, x - u * 0.8, y - u * 1.6, x + u * 0.9, y - u * 1.4, x + u * 0.3, y - u * 2.1, x - u * 0.3, y - u * 2.2, '#a8a8a8');
+        break;
+      case 'lavarock':
+        poly(g, x - u * 1.8, y, x + u * 1.7, y, x + u * 1, y - u * 1.8, x - u * 0.9, y - u * 2, '#2a1a17');
+        g.fillStyle = 'rgba(255,' + (100 + Math.floor(Math.sin(t * 3 + sp.seed) * 40)) + ',0,.9)';
+        g.fillRect(x - u * 0.9, y - u * 0.9, u * 1.2, u * 0.18); g.fillRect(x + u * 0.1, y - u * 1.4, u * 0.14, u * 0.9);
+        break;
+      case 'snowman':
+        circle(g, x, y - u * 1.1, u * 1.1, '#f5f8fb'); circle(g, x, y - u * 2.7, u * 0.75, '#ffffff');
+        g.fillStyle = '#222'; g.fillRect(x - u * 0.6, y - u * 3.5, u * 1.2, u * 0.2); g.fillRect(x - u * 0.4, y - u * 4.1, u * 0.8, u * 0.6);
+        g.fillStyle = '#ff7043'; g.fillRect(x - u * 0.1, y - u * 2.7, u * 0.5, u * 0.15);
+        break;
+      case 'lamp':
+        var sd = Math.sign(sp.offset);
+        g.fillStyle = '#555'; g.fillRect(x - u * 0.15, y - u * 6, u * 0.3, u * 6);
+        g.fillRect(x - u * 1.2 * sd, y - u * 6, u * 1.2, u * 0.25);
+        g.fillStyle = night ? '#ffe9a3' : '#ddd';
+        g.fillRect(x - u * 1.3 * sd - u * 0.2, y - u * 5.95, u * 0.6, u * 0.3);
+        if (night) circle(g, x - u * 1.2 * sd, y - u * 5.6, u * 2.2, 'rgba(255,233,163,.12)');
+        break;
+      case 'tlight':
+        break;   // トンネルの照明は壁と一緒に描く
+      case 'building':
+        var bw2 = u * (6 + (sp.seed % 3) * 2), bh = u * (10 + (sp.seed % 4) * 4);
+        g.fillStyle = night ? '#1b1f33' : '#6b7280';
+        g.fillRect(x - bw2 / 2, y - bh, bw2, bh);
+        if (u > 1.2) {
+          for (var wy = 1; wy * u * 1.6 < bh - u; wy++) {
+            for (var wx = 0; wx < 4; wx++) {
+              var lit = ((sp.seed + wy * 3 + wx * 5) % 4) !== 0;
+              g.fillStyle = night ? (lit ? '#ffd76a' : '#2a2f47') : '#9aa3b1';
+              g.fillRect(x - bw2 / 2 + bw2 * (0.12 + wx * 0.22), y - bh + wy * u * 1.6, bw2 * 0.12, u * 0.8);
+            }
+          }
+        }
+        break;
+      case 'lighthouse':
+        for (i = 0; i < 5; i++) poly(g, x - u * (1.1 - i * 0.12), y - u * i * 1.6, x + u * (1.1 - i * 0.12), y - u * i * 1.6,
+                                     x + u * (0.98 - i * 0.12), y - u * (i + 1) * 1.6, x - u * (0.98 - i * 0.12), y - u * (i + 1) * 1.6, i % 2 ? '#e53935' : '#f5f5f5');
+        g.fillStyle = '#333'; g.fillRect(x - u * 0.6, y - u * 9.2, u * 1.2, u * 1.2);
+        g.fillStyle = '#fff59d'; g.fillRect(x - u * 0.4, y - u * 9, u * 0.8, u * 0.8);
+        break;
+      case 'torii':
+        g.fillStyle = '#d32f2f';
+        g.fillRect(x - u * 2.2, y - u * 5, u * 0.45, u * 5); g.fillRect(x + u * 1.75, y - u * 5, u * 0.45, u * 5);
+        g.fillRect(x - u * 2.6, y - u * 4.2, u * 5.2, u * 0.35);
+        g.fillStyle = '#222'; g.fillRect(x - u * 3, y - u * 5.4, u * 6, u * 0.45);
+        break;
+      case 'container':
+        var cols = ['#c62828', '#1565c0', '#2e7d32', '#ef6c00', '#6a1b9a'];
+        for (i = 0; i < 1 + sp.seed % 3; i++) {
+          g.fillStyle = cols[(sp.seed + i) % cols.length];
+          g.fillRect(x - u * 2.6, y - u * (i + 1) * 1.9, u * 5.2, u * 1.8);
+          if (u > 1) { g.fillStyle = 'rgba(0,0,0,.2)'; for (k = 1; k < 6; k++) g.fillRect(x - u * 2.6 + k * u * 0.87, y - u * (i + 1) * 1.9, u * 0.1, u * 1.8); }
+        }
+        break;
+      case 'crane':
+        g.fillStyle = '#f9a825';
+        g.fillRect(x - u * 3, y - u * 14, u * 0.5, u * 14); g.fillRect(x + u * 2.5, y - u * 14, u * 0.5, u * 14);
+        g.fillRect(x - u * 5, y - u * 14.5, u * 12, u * 0.8);
+        g.fillStyle = '#333'; g.fillRect(x + u * 3.5, y - u * 13.7, u * 0.1, u * 5); g.fillRect(x + u * 3, y - u * 8.8, u * 1.1, u * 0.6);
+        break;
+      case 'barrier':
+        g.fillStyle = '#9e9e9e';
+        g.fillRect(x - u * 3, y - u * 1.3, u * 6, u * 0.45);
+        g.fillStyle = '#616161'; g.fillRect(x - u * 2.8, y - u * 1.3, u * 0.25, u * 1.3); g.fillRect(x + u * 2.55, y - u * 1.3, u * 0.25, u * 1.3);
+        break;
+      case 'billboard':
+        g.fillStyle = '#444'; g.fillRect(x - u * 2, y - u * 4, u * 0.3, u * 4); g.fillRect(x + u * 1.7, y - u * 4, u * 0.3, u * 4);
+        g.fillStyle = night ? '#101830' : '#fafafa'; g.fillRect(x - u * 3.2, y - u * 7, u * 6.4, u * 3.2);
+        g.fillStyle = ['#e53935', '#1e88e5', '#43a047', '#8e24aa'][sp.seed % 4]; g.fillRect(x - u * 3.2, y - u * 7, u * 6.4, u * 0.6);
+        if (u > 1.2) {
+          g.font = 'bold ' + Math.round(u * 1.4) + 'px ui-monospace, monospace'; g.textAlign = 'center';
+          g.fillStyle = night ? '#5ccfa0' : '#222';
+          g.fillText(['TUI-BASE', '$ race', 'ZERO-DAY', 'NITRO'][sp.seed % 4], x, y - u * 4.9);
+        }
+        break;
+      case 'grandstand':
+        for (i = 0; i < 4; i++) {
+          g.fillStyle = i % 2 ? '#78909c' : '#90a4ae';
+          g.fillRect(x - u * 7, y - u * (i + 1) * 1.6, u * 14, u * 1.6);
+          if (u > 0.8) {
+            for (k = 0; k < 14; k++) {
+              g.fillStyle = ['#e53935', '#fdd835', '#1e88e5', '#fafafa', '#43a047'][(k + i + sp.seed + Math.floor(t * 2)) % 5];
+              g.fillRect(x - u * 6.6 + k * u, y - u * (i + 1) * 1.6 + u * 0.2 + (Math.sin(t * 8 + k + i) > 0.7 ? -u * 0.3 : 0), u * 0.55, u * 0.6);
+            }
+          }
+        }
+        g.fillStyle = '#546e7a'; g.fillRect(x - u * 7.4, y - u * 7.4, u * 14.8, u * 0.8);
+        break;
+      case 'tyrewall':
+        for (i = 0; i < 3; i++) for (k = 0; k < 5; k++) circle(g, x - u * 2 + k * u, y - u * 0.5 - i * u, u * 0.5, (i + k) % 2 ? '#222' : '#e53935');
+        break;
+      case 'neon':
+        var nc = sp.seed % 2 ? '#00e5ff' : '#ff00c8';
+        g.fillStyle = rgba(nc, 0.18); g.fillRect(x - u * 1.1, y - u * 9, u * 2.2, u * 9);
+        g.fillStyle = nc; g.fillRect(x - u * 0.3, y - u * 9, u * 0.6, u * 9);
+        g.fillStyle = '#fff'; g.fillRect(x - u * 0.1, y - u * 9, u * 0.2, u * 9);
+        break;
+      case 'holo':
+        g.strokeStyle = sp.seed % 2 ? '#ff00c8' : '#00e5ff'; g.lineWidth = Math.max(1, u * 0.25);
+        g.strokeRect(x - u * 3, y - u * 7 + Math.sin(t * 2 + sp.seed) * u * 0.3, u * 6, u * 3);
+        if (u > 1) {
+          g.font = 'bold ' + Math.round(u * 1.6) + 'px ui-monospace, monospace'; g.textAlign = 'center';
+          g.fillStyle = g.strokeStyle; g.fillText(sp.seed % 3 ? 'TUI' : '> _', x, y - u * 5 + Math.sin(t * 2 + sp.seed) * u * 0.3);
+        }
+        g.lineWidth = 1;
+        break;
+      case 'arch':
+        var aw = s * 1.3, ah = s * 1.0;
+        g.strokeStyle = 'rgba(0,229,255,.8)'; g.lineWidth = Math.max(1, s * 0.03);
+        g.strokeRect(x - aw, y - ah, aw * 2, ah);
+        g.strokeStyle = 'rgba(255,0,200,.6)'; g.strokeRect(x - aw * 0.96, y - ah * 0.96, aw * 1.92, ah * 0.96);
+        g.lineWidth = 1;
+        break;
+      case 'acttower':   // 駅前の高いタワー（ハーモニカのような形）
+        g.fillStyle = '#b0bec5'; g.fillRect(x - u * 2.2, y - u * 34, u * 4.4, u * 34);
+        g.fillStyle = '#cfd8dc'; g.fillRect(x - u * 2.2, y - u * 34, u * 1.2, u * 34);
+        g.beginPath(); g.fillStyle = '#90a4ae'; g.ellipse(x, y - u * 34, u * 2.2, u * 1.6, 0, Math.PI, 0); g.fill();
+        if (u > 0.6) for (k = 0; k < 16; k++) { g.fillStyle = night ? 'rgba(255,215,106,.7)' : 'rgba(40,60,80,.35)'; g.fillRect(x - u * 1.8, y - u * (32 - k * 2), u * 3.6, u * 0.4); }
+        break;
+      case 'castle':
+        g.fillStyle = '#9e9e9e'; poly(g, x - u * 6, y, x + u * 6, y, x + u * 4.8, y - u * 3, x - u * 4.8, y - u * 3, '#8d8d8d');
+        for (k = 0; k < 3; k++) {
+          var cw2 = u * (4.2 - k * 1.1), cy2 = y - u * (3 + k * 2.6);
+          g.fillStyle = '#f5f5f0'; g.fillRect(x - cw2 * 0.8, cy2 - u * 2, cw2 * 1.6, u * 2);
+          poly(g, x - cw2 * 1.15, cy2 - u * 1.8, x + cw2 * 1.15, cy2 - u * 1.8, x + cw2 * 0.6, cy2 - u * 2.8, x - cw2 * 0.6, cy2 - u * 2.8, '#37474f');
+        }
+        g.fillStyle = '#ffd700'; g.fillRect(x - u * 1.3, y - u * 11.8, u * 0.5, u * 0.9); g.fillRect(x + u * 0.8, y - u * 11.8, u * 0.5, u * 0.9);
+        break;
+      case 'twintower':
+        [[-2.8, 30], [2.8, 26]].forEach(function (tw) {
+          g.fillStyle = night ? '#2a3350' : '#b3c4d6'; g.fillRect(x + u * tw[0] - u * 1.6, y - u * tw[1], u * 3.2, u * tw[1]);
+          g.fillStyle = night ? '#3a4568' : '#d6e2ee'; g.fillRect(x + u * tw[0] - u * 1.6, y - u * tw[1], u * 0.9, u * tw[1]);
+          if (night && u > 0.5) for (var q = 2; q < tw[1]; q += 3) { g.fillStyle = 'rgba(255,215,106,.6)'; g.fillRect(x + u * tw[0] - u * 1.2, y - u * q, u * 2.4, u * 0.35); }
+        });
+        g.fillStyle = night ? '#232b45' : '#8fa3b8'; g.fillRect(x - u * 6, y - u * 8, u * 12, u * 8);
+        break;
+      case 'tvtower':
+        g.strokeStyle = night ? '#ff8a65' : '#b0443a'; g.lineWidth = Math.max(1, u * 0.35);
+        g.beginPath(); g.moveTo(x - u * 3, y); g.lineTo(x - u * 0.6, y - u * 20); g.lineTo(x + u * 0.6, y - u * 20); g.lineTo(x + u * 3, y); g.stroke();
+        for (k = 1; k < 6; k++) { var ww = u * (3 - k * 0.45); g.beginPath(); g.moveTo(x - ww, y - u * k * 3.4); g.lineTo(x + ww, y - u * k * 3.4); g.stroke(); }
+        g.fillStyle = night ? '#ffcc80' : '#cfd8dc'; g.fillRect(x - u * 1.6, y - u * 16, u * 3.2, u * 1.4);
+        g.fillStyle = g.strokeStyle; g.fillRect(x - u * 0.15, y - u * 25, u * 0.3, u * 5);
+        g.lineWidth = 1;
+        break;
+      case 'ferris':
+        var fr = u * 6, fcx = x, fcy = y - u * 7.5;
+        g.strokeStyle = night ? '#80deea' : '#eceff1'; g.lineWidth = Math.max(1, u * 0.3);
+        g.beginPath(); g.arc(fcx, fcy, fr, 0, Math.PI * 2); g.stroke();
+        for (k = 0; k < 8; k++) {
+          var fa = k * Math.PI / 4 + t * 0.2;
+          g.beginPath(); g.moveTo(fcx, fcy); g.lineTo(fcx + Math.cos(fa) * fr, fcy + Math.sin(fa) * fr); g.stroke();
+          g.fillStyle = ['#e53935', '#fdd835', '#1e88e5', '#43a047'][k % 4]; g.fillRect(fcx + Math.cos(fa) * fr - u * 0.5, fcy + Math.sin(fa) * fr, u, u * 0.9);
+        }
+        g.beginPath(); g.moveTo(fcx - u * 3, y); g.lineTo(fcx, fcy); g.lineTo(fcx + u * 3, y); g.stroke();
+        g.lineWidth = 1;
+        break;
+      case 'tea':   // 茶畑の畝
+        for (k = 0; k < 3; k++) { g.fillStyle = k % 2 ? '#2e7d32' : '#388e3c'; g.beginPath(); g.ellipse(x + (k - 1) * u * 2.4, y - u * 0.7, u * 1.2, u * 0.8, 0, Math.PI, 0); g.fill(); }
+        break;
+      case 'dune':
+        g.fillStyle = '#e8d3a0'; g.beginPath(); g.ellipse(x, y, u * 7, u * 3, 0, Math.PI, 0); g.fill();
+        g.fillStyle = 'rgba(0,0,0,.07)'; g.beginPath(); g.ellipse(x + u * 2, y, u * 4, u * 2, 0, Math.PI, 0); g.fill();
+        break;
+      case 'kite':   // 凧揚げの凧
+        var ky = y - u * (9 + Math.sin(t + sp.seed) * 1.5);
+        poly(g, x, ky - u * 1.6, x + u * 1.2, ky, x, ky + u * 1.6, x - u * 1.2, ky, ['#e53935', '#1e88e5', '#fdd835'][sp.seed % 3]);
+        g.strokeStyle = 'rgba(80,80,80,.6)'; g.beginPath(); g.moveTo(x, ky + u * 1.6); g.lineTo(x - u * 2, y); g.stroke();
+        break;
+      case 'unagi':  // うなぎ屋ののれん
+        g.fillStyle = '#5d4037'; g.fillRect(x - u * 2.4, y - u * 4, u * 4.8, u * 4);
+        g.fillStyle = '#1a237e'; g.fillRect(x - u * 2.2, y - u * 4, u * 4.4, u * 1.4);
+        if (u > 1.1) { g.fillStyle = '#fff'; g.font = 'bold ' + Math.round(u * 1.1) + 'px sans-serif'; g.textAlign = 'center'; g.fillText('うなぎ', x, y - u * 2.9); }
+        break;
+      case 'piano':  // 鍵盤の看板（楽器の街）
+        g.fillStyle = '#222'; g.fillRect(x - u * 3, y - u * 3.4, u * 6, u * 2);
+        for (k = 0; k < 10; k++) { g.fillStyle = '#fafafa'; g.fillRect(x - u * 2.9 + k * u * 0.58, y - u * 3.3, u * 0.5, u * 1.8); }
+        for (k = 0; k < 9; k++) if (k % 7 !== 2 && k % 7 !== 6) { g.fillStyle = '#111'; g.fillRect(x - u * 2.55 + k * u * 0.58, y - u * 3.3, u * 0.3, u * 1.1); }
+        g.fillStyle = '#444'; g.fillRect(x - u * 0.15, y - u * 1.4, u * 0.3, u * 1.4);
+        break;
+      case 'soundwall':
+        g.fillStyle = '#9aa7b3'; g.fillRect(x - u * 5, y - u * 3, u * 10, u * 3);
+        g.fillStyle = 'rgba(255,255,255,.2)'; for (k = 0; k < 5; k++) g.fillRect(x - u * 5 + k * u * 2, y - u * 3, u * 0.2, u * 3);
+        break;
+      case 'greensign':
+        g.fillStyle = '#555'; g.fillRect(x - u * 0.2, y - u * 5, u * 0.4, u * 5);
+        g.fillStyle = '#1b7a3e'; g.fillRect(x - u * 3, y - u * 7.5, u * 6, u * 2.8);
+        g.strokeStyle = '#fff'; g.strokeRect(x - u * 2.8, y - u * 7.3, u * 5.6, u * 2.4);
+        if (u > 1) { g.fillStyle = '#fff'; g.font = 'bold ' + Math.round(u * 1.1) + 'px sans-serif'; g.textAlign = 'center'; g.fillText(['名古屋', '浜松', '豊橋', '岡崎'][sp.seed % 4], x, y - u * 5.7); }
+        break;
+      case 'tollgate':
+        for (k = -2; k <= 2; k++) { g.fillStyle = '#607d8b'; g.fillRect(x + k * u * 2.6 - u * 0.4, y - u * 4, u * 0.8, u * 4); }
+        g.fillStyle = '#eceff1'; g.fillRect(x - u * 6, y - u * 5, u * 12, u * 1.2);
+        g.fillStyle = '#1e88e5'; g.fillRect(x - u * 6, y - u * 5, u * 12, u * 0.3);
+        break;
+      case 'banner': case 'fork':
+        var bh2 = s * (sp.kind === 'fork' ? 0.32 : 0.2), half2 = s * 1.15, top2 = y - s * 1.05;
+        g.fillStyle = '#444'; g.fillRect(x - half2, top2, s * 0.04, y - top2); g.fillRect(x + half2 - s * 0.04, top2, s * 0.04, y - top2);
+        g.fillStyle = sp.kind === 'fork' ? '#1b7a3e' : '#0d47a1'; g.fillRect(x - half2, top2, half2 * 2, bh2);
+        if (s > 24) {
+          g.fillStyle = '#fff'; g.textAlign = 'center';
+          g.font = 'bold ' + Math.max(7, Math.round(s * (sp.kind === 'fork' ? 0.09 : 0.1))) + 'px sans-serif';
+          if (sp.kind === 'fork') sp.texts.forEach(function (tx, j, arr) { g.fillText(tx, x - half2 + half2 * 2 * (j + 0.5) / arr.length, top2 + bh2 * 0.62); });
+          else g.fillText(sp.text, x, top2 + bh2 * 0.7);
+        }
+        break;
+      case 'sign':
+        g.fillStyle = '#444'; g.fillRect(x - u * 1.4, y - u * 2.4, u * 0.2, u * 2.4); g.fillRect(x + u * 1.2, y - u * 2.4, u * 0.2, u * 2.4);
+        g.fillStyle = '#f2f2f2'; g.fillRect(x - u * 1.8, y - u * 4, u * 3.6, u * 1.8);
+        if (u > 1.4) {
+          g.fillStyle = '#e14d4d'; g.font = 'bold ' + Math.round(u * 1.1) + 'px monospace'; g.textAlign = 'center';
+          g.fillText('TUI', x, y - u * 2.7);
+        }
+        break;
+      case 'chevron':
+        g.fillStyle = '#333'; g.fillRect(x - u * 0.15, y - u * 2.2, u * 0.3, u * 2.2);
+        g.fillStyle = '#ffd93d'; g.fillRect(x - u * 1.6, y - u * 3.6, u * 3.2, u * 1.6);
+        for (var c = -1; c <= 1; c++) {
+          var cx = x + c * u * 0.9, d = sp.dir;
+          poly(g, cx - d * u * 0.3, y - u * 3.45, cx + d * u * 0.2, y - u * 2.8, cx - d * u * 0.3, y - u * 2.15, cx - d * u * 0.1, y - u * 2.8, '#222');
+        }
+        break;
+      case 'gantry': case 'cpgate':
+        var half = s * 1.2;
+        g.fillStyle = '#333';
+        g.fillRect(x - half, y - s * 0.9, s * 0.05, s * 0.9);
+        g.fillRect(x + half - s * 0.05, y - s * 0.9, s * 0.05, s * 0.9);
+        if (sp.kind === 'cpgate') {
+          g.fillStyle = '#1565c0'; g.fillRect(x - half, y - s * 0.98, half * 2, s * 0.16);
+          if (s > 30) { g.fillStyle = '#fff'; g.font = 'bold ' + Math.round(s * 0.1) + 'px ui-monospace, monospace'; g.textAlign = 'center'; g.fillText('CHECKPOINT', x, y - s * 0.86); }
+          break;
+        }
+        var cells = 16, cw = (half * 2) / cells;
+        for (k = 0; k < cells; k++) {
+          g.fillStyle = k % 2 ? '#111' : '#f5f5f5';
+          g.fillRect(x - half + k * cw, y - s * 0.95, cw, s * 0.07);
+          g.fillStyle = k % 2 ? '#f5f5f5' : '#111';
+          g.fillRect(x - half + k * cw, y - s * 0.88, cw, s * 0.07);
+        }
+        break;
+    }
+  }
+
+  /** 道の上の物（コーン・オイル・加速パネル・落石） */
+  function drawObj(g, o, x, y, s, t) {
+    var u = s * 0.12;
+    if (o.hit && o.kind !== 'oil' && o.kind !== 'pad') return;
+    switch (o.kind) {
+      case 'cone':
+        poly(g, x - u * 0.6, y, x + u * 0.6, y, x + u * 0.12, y - u * 1.6, x - u * 0.12, y - u * 1.6, '#ff6d00');
+        g.fillStyle = '#fff'; g.fillRect(x - u * 0.35, y - u * 0.9, u * 0.7, u * 0.25);
+        break;
+      case 'debris':
+        poly(g, x - u, y, x + u * 0.9, y, x + u * 0.5, y - u * 0.9, x - u * 0.6, y - u * 1.1, '#6d5d55');
+        break;
+      case 'oil':
+        g.fillStyle = 'rgba(10,10,14,.85)';
+        g.beginPath(); g.ellipse(x, y - u * 0.1, u * 2.2, u * 0.45, 0, 0, Math.PI * 2); g.fill();
+        g.fillStyle = 'rgba(140,120,255,.25)';
+        g.beginPath(); g.ellipse(x - u * 0.4, y - u * 0.2, u * 0.9, u * 0.15, 0, 0, Math.PI * 2); g.fill();
+        break;
+      case 'coin':
+        if (o.hit) return;
+        var sq = Math.abs(Math.sin(t * 4 + o.offset * 3));
+        g.fillStyle = '#ffd54f';
+        g.beginPath(); g.ellipse(x, y - u * 1.2, Math.max(1, u * 0.7 * sq), u * 0.7, 0, 0, Math.PI * 2); g.fill();
+        g.fillStyle = '#ff8f00'; g.fillRect(x - Math.max(0.5, u * 0.12 * sq), y - u * 1.5, Math.max(1, u * 0.24 * sq), u * 0.6);
+        break;
+      case 'pad':
+        var glow = 0.55 + Math.sin(t * 8) * 0.3;
+        g.fillStyle = 'rgba(0,229,255,' + glow + ')';
+        for (var k = 0; k < 3; k++) {
+          var yy = y - u * k * 0.35;
+          poly(g, x - u * 1.8, yy, x - u * 1.2, yy, x, yy - u * 0.5, x, yy - u * 0.25, g.fillStyle);
+          poly(g, x + u * 1.8, yy, x + u * 1.2, yy, x, yy - u * 0.5, x, yy - u * 0.25, g.fillStyle);
+        }
+        break;
+    }
+  }
+
+  function spriteWidth(kind) {
+    return { tree: 0.35, pine: 0.35, snowpine: 0.35, palm: 0.3, rock: 0.35, lavarock: 0.35, lamp: 0.12, building: 0.9,
+             sign: 0.4, chevron: 0.35, cactus: 0.25, mesa: 1.2, bush: 0.3, snowman: 0.25, lighthouse: 0.3, torii: 0.6,
+             container: 0.6, crane: 0.9, barrier: 0.6, billboard: 0.6, grandstand: 1.4, tyrewall: 0.45, neon: 0.15, holo: 0,
+             acttower: 0.5, castle: 1.2, twintower: 1.2, tvtower: 0.6, ferris: 0.8, unagi: 0.5, piano: 0.5, soundwall: 1, greensign: 0.1,
+             tollgate: 0, maple: 0.35 }[kind] || 0;
+  }
+  function objWidth(kind) { return { cone: 0.06, debris: 0.1, oil: 0.24, pad: 0.22, coin: 0.12 }[kind] || 0; }
+
+  /* ---------- 顔（会話の場面で使う 24×24 の絵） ---------- */
+
+  function drawPortrait(cv, f) {
+    var g = cv.getContext('2d'), N = 24, p = cv.width / N;
+    function px(x, y, w, h, c) { g.fillStyle = c; g.fillRect(Math.round(x * p), Math.round(y * p), Math.ceil(w * p), Math.ceil(h * p)); }
+    px(0, 0, N, N, f.bg);
+    for (var i = 0; i < N; i += 2) px(0, i, N, 1, 'rgba(255,255,255,.03)');
+    px(3, 19, 18, 5, f.shirt); px(9, 17, 6, 3, shade(f.skin, 0.85));
+    px(6, 5, 12, 13, f.skin); px(7, 17, 10, 1, shade(f.skin, 0.85));
+    var hair = f.hair;
+    switch (f.style) {
+      case 'bob': px(5, 3, 14, 4, hair); px(5, 6, 2, 9, hair); px(17, 6, 2, 9, hair); px(8, 6, 4, 1, hair); break;
+      case 'spiky': px(6, 3, 12, 3, hair); for (i = 0; i < 6; i++) px(6 + i * 2, 1 + (i % 2), 1, 2, hair); px(5, 5, 1, 4, hair); px(18, 5, 1, 4, hair); break;
+      case 'swept': px(6, 3, 12, 3, hair); px(4, 4, 6, 2, hair); px(5, 5, 2, 5, hair); px(17, 5, 1, 3, hair); break;
+      case 'long': px(5, 3, 14, 3, hair); px(4, 5, 3, 15, hair); px(17, 5, 3, 15, hair); break;
+      case 'cap': px(5, 3, 14, 3, '#1a2f5a'); px(4, 5, 16, 1, '#10203d'); px(11, 3, 2, 2, '#ffd54f'); px(6, 6, 2, 3, hair); px(16, 6, 2, 3, hair); break;
+      case 'hood': px(4, 2, 16, 4, hair); px(3, 4, 3, 16, hair); px(18, 4, 3, 16, hair); break;
+      case 'bald': px(6, 4, 12, 2, shade(f.skin, 1.08)); break;
+    }
+    px(8, 10, 2, 2, f.eyes); px(14, 10, 2, 2, f.eyes); px(8, 10, 1, 1, '#fff'); px(14, 10, 1, 1, '#fff');
+    px(10, 15, 4, 1, shade(f.skin, 0.6));
+    switch (f.acc) {
+      case 'goggles': px(6, 4, 12, 2, '#5d4037'); px(7, 4, 4, 2, '#80deea'); px(13, 4, 4, 2, '#80deea'); break;
+      case 'headset': px(5, 8, 1, 5, '#222'); px(18, 8, 1, 5, '#222'); px(5, 3, 14, 1, '#222'); px(15, 14, 4, 1, '#222'); break;
+      case 'visor': px(6, 9, 12, 3, 'rgba(79,143,247,.75)'); break;
+      case 'scar': px(15, 8, 1, 6, '#8e3b3b'); break;
+      case 'mustache': px(9, 14, 6, 1, '#757575'); break;
+      case 'mask': px(6, 12, 12, 6, '#263238'); px(8, 10, 2, 2, '#ff5252'); px(14, 10, 2, 2, '#ff5252'); break;
+      case 'glasses': px(7, 9, 4, 3, 'rgba(0,0,0,.5)'); px(13, 9, 4, 3, 'rgba(0,0,0,.5)'); px(11, 10, 2, 1, '#111'); break;
+      case 'shades': px(7, 9, 10, 3, '#111'); px(8, 9, 2, 1, '#555'); break;
+      case 'monocle': px(13, 9, 4, 4, 'rgba(255,215,0,.35)'); px(13, 9, 4, 1, '#ffd700'); px(16, 13, 1, 5, '#ffd700'); break;
+    }
+  }
+  R.drawPortrait = drawPortrait;
+
+  /* =====================================================================
+     文字版の部品
+     ===================================================================== */
+
+  function textDims() {
+    var screen = document.getElementById('screen');
+    var probe = document.createElement('span');
+    probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;line-height:1;letter-spacing:0';
+    probe.textContent = new Array(51).join('0');
+    screen.appendChild(probe);
+    var cw = probe.getBoundingClientRect().width / 50 || 8;
+    screen.removeChild(probe);
+    var lh = parseFloat(window.getComputedStyle(screen).fontSize) || 14;
+    var cols = clamp(Math.floor((screen.clientWidth - 40) / cw), 40, 120);
+    var pane = document.getElementById('main').clientHeight;
+    var fit = Math.floor((pane - lh * 11) / lh);
+    var rows = clamp(Math.min(Math.round(cols * 0.3), fit), 14, 30);
+    return { w: cols, h: rows };
+  }
+  R.textDims = textDims;
+
+  // 車の色ごとに CSS のクラスを作る（文字版の車体色）
+  var madeCls = {}, styleEl = null;
+  function ccls(hex, bg) {
+    var key = hex.replace('#', '') + (bg ? '-' + bg : '');
+    var name = 'trc-' + key;
+    if (!madeCls[name]) {
+      if (!styleEl) { styleEl = document.createElement('style'); document.head.appendChild(styleEl); }
+      styleEl.sheet.insertRule('.' + name + '{color:' + hex + ';background:' + (bg ? 'var(--tr-' + bg + ')' : 'var(--tr-road-b)') + '}', styleEl.sheet.cssRules.length);
+      madeCls[name] = true;
+    }
+    return name;
+  }
+
+  function wide(ch) { return /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]/.test(ch); }
+  function put(rows, x, yy, ch, cls, clip) {
+    x = Math.round(x); yy = Math.round(yy);
+    if (yy < 0 || yy >= H || x < 0 || x >= W) return;
+    if (clip !== undefined && yy >= clip) return;
+    rows[yy][x] = [ch, cls];
+  }
+  function puts(rows, x, yy, str, cls) {
+    Array.from(str).forEach(function (ch) {
+      if (x >= 0 && x < W && yy >= 0 && yy < H) {
+        rows[yy][x] = [ch, cls];
+        if (wide(ch) && x + 1 < W) rows[yy][x + 1] = ['', cls];
+      }
+      x += wide(ch) ? 2 : 1;
+    });
+  }
+  function strw(str) { return Array.from(str).reduce(function (a, ch) { return a + (wide(ch) ? 2 : 1); }, 0); }
+  function center(rows, yy, str, cls) { puts(rows, Math.floor((W - strw(str)) / 2), yy, str, cls); }
+
+  /* =====================================================================
+     1 回のレース
+     ===================================================================== */
+
+  /*
+   * cfg:
+   *   track, mirror, weather, laps（Infinity も可）, mode（race/time/elim/duel/arcade/chase/traffic）
+   *   field [{name,color,body,ai,skill,pace,boss,ability,target}], traffic（台数）
+   *   car {body,color,stats,offroad,siren}, levelMul, bestLap, ghost, timeLimit, cpBonus
+   *   demo（自動運転の見本）, tui, onFinish(result)
+   */
+  R.Session = function (cfg) {
+    var sess = {};
+    var weather = cfg.weather || 'clear';
+    var T = buildTrack(cfg.track, cfg.mirror, weather);
+    var segs = T.segs, trackLen = T.length, spec = T.spec, pal = T.pal, night = !!spec.night;
+    var mode = cfg.mode || 'race', demo = !!cfg.demo;
+    var laps = cfg.laps || Infinity;
+    var lvl = cfg.levelMul || 1;
+    var car = cfg.car || { body: 'sedan', color: '#5ccfa0', stats: { spd: 6, acc: 6, grp: 6, arm: 6, nit: 6 } };
+    var st = car.stats;
+    var wGrip = { rain: 0.86, snow: 0.76 }[weather] || 1;
+    if (car.offroad) wGrip = 1 - (1 - wGrip) * 0.35;
+    var fogDensity = { fog: 10, rain: 6.5, snow: 7, sand: 7, ash: 7 }[weather] || 5;
+
+    // 性能を物理の数字に直す
+    var topSpeed = MAX * (0.7 + st.spd * 0.035);
+    var accel = MAX / 5 * (0.7 + st.acc * 0.07);
+    var steer = 2 * (0.82 + st.grp * 0.03);
+    var grip = (1.35 - st.grp * 0.07) / wGrip;
+    var offDecel = -MAX / 2 * (car.offroad ? 0.5 : 1) * (1.2 - st.grp * 0.04);
+    var dmgTaken = clamp(1.4 - st.arm * 0.09, 0.35, 1.3);
+    var nitroRate = 0.34 / (0.7 + st.nit * 0.08);
+    var nitroPower = 1.16 + st.nit * 0.012;
+    var nitroRefill = 0.8 + st.nit * 0.06;
+
+    // アーケードのチェックポイント門
+    if (mode === 'arcade') {
+      [1, 2].forEach(function (k) { segs[Math.floor(segs.length * k / 3)].sprites.push({ kind: 'cpgate', offset: 0 }); });
+    }
+
+    var P = {
+      pos: 0, x: 0, speed: 0, total: 0, lap: 0,
+      nitro: mode === 'traffic' ? 0.4 : 0.6, boosting: false, damage: 0,
+      lapStart: 0, lastLap: null, bestLap: null, laps: [],
+      finished: false, finishTime: null, bump: 0, draft: 0, hitCool: 0, spin: 0, padT: 0, skid: 0
+    };
+
+    /* --- 相手 --- */
+    var field = cfg.field || [];
+    var nrows = Math.ceil(field.length / 2);
+    var cars = field.map(function (d, i) {
+      var c = {
+        name: d.name, color: d.color, body: d.body || 'sedan', ai: d.ai || 'balanced', ability: d.ability || null,
+        boss: !!d.boss, isTarget: !!d.target, skill: d.skill || 0.7,
+        max: MAX * (d.pace || 1) * lvl * (d.ai === 'speedster' ? 1.03 : 1),
+        speed: 0, boostT: 0, burst: 1.14, finished: false, finishTime: null, out: false,
+        wm: bodyWm(d.body), oilT: 4 + Math.random() * 4, blockT: 0, hp: 1, hitCool: 0, lane: 0, laneT: 0
+      };
+      if (mode === 'duel' || mode === 'drag') { c.total = PLAYER_Z; c.offset = -0.45; }
+      else if (mode === 'touge') { c.total = PLAYER_Z + SEG * 7; c.offset = 0; }
+      else if (mode === 'chase') { c.total = PLAYER_Z + SEG * 45; c.offset = 0; }
+      else {
+        var row = Math.floor(i / 2);
+        c.total = PLAYER_Z + (nrows - row) * SEG * 3 + (i % 2) * SEG;
+        c.offset = i % 2 ? 0.45 : -0.45;
+      }
+      c.target = c.offset;
+      return c;
+    });
+    if (mode === 'duel' || mode === 'drag') P.x = 0.45;
+    if (cfg.start) {   // 前の道から引き継ぐ（オープンワールド）
+      ['speed', 'x', 'nitro', 'damage', 'total'].forEach(function (k) { if (cfg.start[k] !== undefined) P[k] = cfg.start[k]; });
+      if (cfg.start.frac !== undefined) P.total = clamp(cfg.start.frac, 0, 0.95) * trackLen;
+      P.pos = P.total % trackLen;
+    }
+    var GEAR_TOP = [0.3, 0.48, 0.66, 0.84, 1.02], GEAR_ACC = [2.3, 1.75, 1.4, 1.12, 0.92];
+    P.gear = 1; P.rpm = 0; P.maxSpeed = 0; P.stopT = 0;
+    var edgeDone = false, coinsGot = 0;
+    var p2p = !!(spec.touge || spec.p2p) || mode === 'drag';
+    var goalDist = mode === 'drag' ? SEG * Math.round(402 / MPS) : (spec.finishAt ? spec.finishAt * SEG - PLAYER_Z : Infinity);
+    var dragLen = goalDist;
+    if (p2p) laps = 1;
+    var gates = [], penalty = 0;
+    if (mode === 'gymkhana') {
+      for (var gi = 30, gk = 0; gi < spec.finishAt - 10; gi += 20, gk++) {
+        var goff = clamp((gk % 2 ? 0.38 : -0.38) - segs[gi].curve * 0.03, -0.7, 0.7);
+        segs[gi].objs.push({ kind: 'cone', offset: goff - 0.27 }, { kind: 'cone', offset: goff + 0.27 });
+        gates.push({ z: (gi + 0.5) * SEG, off: goff, done: false });
+      }
+    }
+    if (cfg.casual) segs.forEach(function (sg, i) {
+      if (i < 40 || sg.tunnel || sg.finishLine) return;
+      if (i % 70 === 0) sg.objs.push({ kind: 'pad', offset: [-0.55, 0, 0.55][Math.floor(i / 70) % 3] });
+      else if (i % 45 === 0) for (var c3 = 0; c3 < 5 && segs[i + c3 * 3]; c3++) segs[i + c3 * 3].objs.push({ kind: 'coin', offset: [0.6, 0, -0.6][Math.floor(i / 45) % 3] });
+    });
+    if (mode === 'coins') segs.forEach(function (sg, i) { if (i > 30 && i % 9 === 0 && !sg.tunnel) sg.objs.push({ kind: 'coin', offset: [-0.6, 0, 0.6][Math.floor(i / 9) % 3] + Math.sin(i) * 0.1 }); });
+    var targetCar = cars.filter(function (c) { return c.isTarget; })[0] || null;
+    var bossCar = cars.filter(function (c) { return c.boss; })[0] || (mode === 'touge' ? cars[0] : null);
+
+    /* --- 一般車 --- */
+    var traffic = [];
+    var LANE_X = [-0.62, 0, 0.62];
+    function newTraffic(ahead) {
+      var t = R.TRAFFIC[Math.floor(Math.random() * R.TRAFFIC.length)];
+      return { body: t.body, color: t.color, traffic: true, wm: bodyWm(t.body),
+               total: pz() + ahead, offset: LANE_X[Math.floor(Math.random() * 3)] + (Math.random() - 0.5) * 0.1,
+               speed: MAX * (0.3 + Math.random() * 0.2), passed: false };
+    }
+    for (var ti = 0; ti < (cfg.traffic || 0); ti++) traffic.push(newTraffic(SEG * (30 + ti * (260 / Math.max(1, cfg.traffic)))));
+
+    /* --- 状態 --- */
+    var state = demo || cfg.start ? 'race' : 'count', countT = 3.2, raceT = 0, keys = {};
+    var msg = { text: '', t: 0 }, popups = [], parts = [], dyn = [];
+    var skyOff = 0, hillOff = 0, finishWait = 0, result = null;
+    var timer = cfg.timeLimit || 0, cpDist = trackLen / 3, nextCp = cpDist;
+    var score = 0, combo = 0, comboT = 0, nearCount = 0, maxCombo = 0, overtakes = 0, topKmh = 0;
+    var prevRank = null, eliminated = [], flash = 0, lastHitName = '';
+    var ghost = cfg.ghost || null, rec = { s: [], x: [] }, newGhost = null;
+    var t0 = 0;
+    var eng = !demo && R.carAudio ? R.carAudio(car.body) : { update: function () {}, set: function () {}, stop: function () {}, mute: function () {}, event: function () {}, info: function () { return {}; } };
+    var passT = 0;
+
+    function say(text, t) { msg.text = text; msg.t = t || 1.6; }
+    function pop(text, color) { popups.push({ text: text, color: color || '#ffd93d', t: 1.6 }); if (popups.length > 4) popups.shift(); }
+    function findSeg(z) { return segs[Math.floor((((z % trackLen) + trackLen) % trackLen) / SEG) % segs.length]; }
+    function pz() { return P.total + PLAYER_Z; }
+    function racers() { return cars.filter(function (c) { return !c.out; }); }
+    function rank() {
+      var n = 1, me = pz();
+      racers().forEach(function (c) { if (c.total > me) n++; });
+      return n;
+    }
+    function kmh(v) { return Math.round(v / MAX * 280); }
+
+    /* --- 自動運転（見本走行・ゴール後・テスト用） --- */
+    function autopilot() {
+      var ahead = findSeg(pz() + SEG * 10), far = findSeg(pz() + SEG * 22);
+      var tx = clamp(-(ahead.curve * 0.08 + far.curve * 0.04), -0.65, 0.65);
+      if (targetCar && !targetCar.caught && targetCar.total - pz() < SEG * 40) tx = targetCar.offset;
+      cars.concat(traffic).forEach(function (c) {
+        if (c.out || c.isTarget) return;
+        var gap = c.total - pz();
+        if (gap > 0 && gap < SEG * 12 && Math.abs(c.offset - tx) < 0.42) tx = c.offset > 0 ? c.offset - 0.6 : c.offset + 0.6;
+      });
+      tx = clamp(tx, -0.8, 0.8);
+      keys.left = P.x > tx + 0.06; keys.right = P.x < tx - 0.06;
+      var sharp = Math.max(Math.abs(ahead.curve), Math.abs(far.curve)) > 4.5 && P.speed > topSpeed * 0.84;
+      keys.up = !sharp; keys.down = sharp && P.speed > topSpeed * 0.92;
+      keys.nitro = Math.abs(ahead.curve) < 1.2 && Math.abs(far.curve) < 2 && P.nitro > 0.45;
+      if (mode === 'drag') { keys.nitro = P.rpm > 0.86; keys.left = keys.right = false; }
+      if (mode === 'brake') { var dz = (cfg.stopAt + 0.5) * SEG - pz(), stopD = P.speed * P.speed / (2 * BRAKE); keys.up = dz > stopD * 1.02; keys.down = !keys.up; keys.nitro = false; }
+    }
+
+    /* --- 更新 --- */
+    var geom = spec.touge || spec.narrow ? { rw: 1350, cw: 0.19, lanes: 2 } : { rw: 2000, cw: 0.13, lanes: 3 };
+    function useGeom() { ROAD_W = geom.rw; CAR_W = geom.cw; OVERLAP = CAR_W * 2 * 0.9; LANES = geom.lanes; }
+    function update(dt) {
+      useGeom();
+      t0 += dt;
+      if (msg.t > 0) msg.t -= dt;
+      popups.forEach(function (p) { p.t -= dt; });
+      popups = popups.filter(function (p) { return p.t > 0; });
+      if (flash > 0) flash -= dt;
+      updateParts(dt);
+
+      if (state === 'count') {
+        var before = Math.ceil(countT);
+        countT -= dt;
+        var after = Math.ceil(countT);
+        if (after !== before && after >= 1 && after <= 3) sfx('count');
+        if (countT <= 0) { state = 'race'; say('GO!', 1); sfx('go'); }
+        eng.update({ speed: 0, throttle: keys.up, rain: weather === 'rain' });
+        moveTraffic(dt);
+        return;
+      }
+      if (state === 'results') { eng.update({ speed: P.speed / topSpeed, throttle: false }); moveTraffic(dt); return; }
+
+      raceT += dt;
+      if (demo || R.auto || P.finished) autopilot();
+
+      var seg = findSeg(pz());
+      var pct = P.speed / MAX;
+      var dxs = dt * steer * pct, dxc = dt * 2 * pct;
+
+      if (P.spin > 0) {
+        P.spin -= dt;
+        P.x += Math.sin(raceT * 13) * dt * 1.4;
+        P.speed -= MAX * 0.4 * dt;
+      } else {
+        if (keys.left) P.x -= dxs;
+        else if (keys.right) P.x += dxs;
+      }
+      P.x -= dxc * pct * seg.curve * CENTRIFUGAL * grip;
+      P.skid = (Math.abs(seg.curve) > 3 && pct > 0.7 && ((seg.curve > 0 && keys.right) || (seg.curve < 0 && keys.left))) ? 1 : 0;
+
+      // スリップストリーム
+      P.draft = 0;
+      racers().forEach(function (c) {
+        var gap = c.total - pz();
+        if (gap > SEG * 1.5 && gap < SEG * 9 && Math.abs(c.offset - P.x) < 0.35) P.draft = 1;
+      });
+
+      // ニトロ
+      P.boosting = false;
+      if (keys.nitro && P.nitro > 0.02 && pct > 0.2 && P.spin <= 0 && mode !== 'drag' && mode !== 'brake') {
+        P.boosting = true;
+        P.nitro = Math.max(0, P.nitro - nitroRate * dt);
+        if (!P.wasBoosting && !demo) sfx('boost');
+      }
+      P.wasBoosting = P.boosting;
+      var refill = (0.012 + (P.draft ? 0.08 : 0) + (pct > 0.85 && Math.abs(P.x) < 1 ? 0.018 : 0)) * nitroRefill;
+      if (!P.boosting) P.nitro = Math.min(1, P.nitro + refill * dt);
+      if (P.padT > 0) P.padT -= dt;
+
+      var wrecked = P.damage >= 1;
+      var limit = topSpeed * (1 - Math.min(P.damage, 1) * 0.18) * (P.boosting ? nitroPower : 1) * (P.draft ? 1.06 : 1) *
+                  (P.padT > 0 ? 1.18 : 1) * (wrecked ? 0.8 : 1);
+      if (P.finished && !demo) limit = Math.min(limit, MAX * 0.5);
+      if (mode === 'drag') {
+        var gtop = topSpeed * GEAR_TOP[P.gear - 1];
+        P.rpm = clamp(P.speed / gtop, 0, 1.05);
+        var torque = P.rpm < 0.25 ? 0.75 : P.rpm < 0.97 ? 1 : 0;
+        if (!P.finished) P.speed += accel * GEAR_ACC[P.gear - 1] * torque * (P.padT > 0 ? 1.25 : 1) * dt;
+        else P.speed -= MAX * 0.5 * dt;
+        P.boosting = false;
+        if (keys.nitro && !P.shiftHeld && P.gear < 5 && !P.finished) {
+          var q = P.rpm >= 0.8 && P.rpm <= 0.97 ? 'perfect' : P.rpm < 0.62 ? 'early' : 'good';
+          P.gear++;
+          if (q === 'perfect') { P.padT = 0.7; pop('PERFECT SHIFT!', '#5ccfa0'); sfx('coin'); }
+          else if (q === 'early') { P.speed *= 0.97; pop(L('早すぎ…', 'EARLY'), '#ff8a80'); }
+          else pop('GOOD', '#ffd93d');
+        }
+        P.shiftHeld = !!keys.nitro;
+        limit = topSpeed * 1.1;
+      } else if (keys.up || P.boosting) P.speed += (P.boosting ? accel * 1.6 : accel) * dt;
+      else if (keys.down) P.speed -= BRAKE * dt;
+      else P.speed -= COAST * dt;
+
+      // 芝生・壁・飾り
+      var off = P.x < -1 || P.x > 1;
+      var wallX = seg.tunnel ? 1.12 : seg.rails ? 1.06 : 0;
+      if (wallX && Math.abs(P.x) > wallX) {
+        P.x = clamp(P.x, -wallX, wallX);
+        if (seg.rails && P.hitCool <= 0 && P.speed > MAX / 4) { sfx('hit'); eng.event('scrape'); P.hitCool = 0.4; P.bump = 0.15; }
+        if (P.speed > MAX / 5) { P.speed -= MAX * 0.9 * dt; P.damage = Math.min(1.2, P.damage + 0.03 * dt * dmgTaken); spark(W / 2 + (P.x > 0 ? 40 : -40), H - 30, 2); }
+      } else if (off) {
+        if (P.speed > MAX / 4) P.speed += offDecel * dt;
+        if (Math.random() < 0.6) dust();
+        seg.sprites.forEach(function (sp) {
+          var sw = spriteWidth(sp.kind);
+          if (!sw) return;
+          var so = sp.offset + (sp.offset > 0 ? sw / 2 : -sw / 2) * 0.6;
+          if (Math.abs(P.x - so) < sw * 0.5 + CAR_W && P.speed > MAX / 6) {
+            P.speed = MAX / 6;
+            hurt(0.08);
+            P.pos = Math.max(0, P.pos - SEG * 0.4);
+            P.bump = 0.3; flash = 0.15;
+            sfx('crash'); eng.event('crash'); spark(W / 2, H - 30, 10);
+            say(L('クラッシュ！', 'CRASH!'), 1);
+            combo = 0;
+          }
+        });
+      }
+
+      // 道の上の物
+      seg.objs.forEach(function (o) { touchObj(o); });
+      dyn.forEach(function (o) { if (Math.abs(o.z - pz()) < SEG * 0.6) touchObj(o); });
+
+      // 車との接触
+      if (P.hitCool > 0) P.hitCool -= dt;
+      racers().concat(traffic).forEach(function (c) { contact(c, dt); });
+
+      P.speed = clamp(P.speed, 0, limit);
+      P.x = clamp(P.x, -2.6, 2.6);
+      if (P.bump > 0) P.bump -= dt;
+      topKmh = Math.max(topKmh, kmh(P.speed));
+
+      var move = P.speed * dt;
+      P.pos += move;
+      P.total += move;
+      while (P.pos >= trackLen) P.pos -= trackLen;
+      if (!demo && state === 'race') {
+        R._km = (R._km || 0) + move / SEG * MPS / 1000;
+      }
+
+      P.maxSpeed = Math.max(P.maxSpeed, P.speed);
+      if (cfg.onTick && !demo) cfg.onTick(dt, { speed: P.speed, damage: P.damage, x: P.x, kmh: kmh(P.speed) });
+      if (mode === 'world' && !edgeDone && P.total >= trackLen - SEG * 3) {
+        edgeDone = true;
+        var nx = cfg.exits || 1, ch = 0;
+        if (nx === 2) ch = P.x < 0 ? 0 : 1;
+        else if (nx >= 3) ch = P.x < -0.3 ? 0 : P.x > 0.3 ? 2 : 1;
+        if (cfg.onEdgeEnd) cfg.onEdgeEnd({ speed: P.speed, x: clamp(P.x, -0.9, 0.9), nitro: P.nitro, damage: P.damage, choice: ch });
+      }
+      if (mode === 'brake' && !P.finished) {
+        var zc = (cfg.stopAt + 0.5) * SEG;
+        if (P.maxSpeed > MAX * 0.4 && P.speed < 2) P.stopT += dt; else P.stopT = 0;
+        if (P.stopT > 0.4) {
+          var dm = (pz() - zc) / SEG * MPS;
+          score = Math.max(0, Math.round((1000 - Math.abs(dm) * 45) * clamp(kmh(P.maxSpeed) / 240, 0.3, 1.2)));
+          P.stopDist = dm;
+          pop(Math.abs(dm) < 1.5 ? L('ピタッ！', 'PERFECT STOP!') : (dm > 0 ? L('行き過ぎ ', 'Over by ') : L('手前 ', 'Short by ')) + Math.abs(dm).toFixed(1) + 'm', '#ffd93d');
+          sfx(Math.abs(dm) < 6 ? 'win' : 'lap');
+          end('stopped');
+        } else if (pz() > zc + SEG * 40) { score = 0; P.stopDist = (pz() - zc) / SEG * MPS; say(L('止まれず…', 'OVERSHOT'), 2); sfx('bad'); end('over'); }
+      }
+      if (mode === 'gymkhana') gates.forEach(function (gt) {
+        if (gt.done || pz() < gt.z) return;
+        gt.done = true;
+        if (Math.abs(P.x - gt.off) < 0.2) { pop(L('ゲート OK', 'GATE OK'), '#5ccfa0'); sfx('click'); }
+        else { penalty += 5; pop(L('ゲート失敗 +5秒', 'MISSED GATE +5s'), '#ff5252'); sfx('bad'); }
+      });
+      if (mode === 'touge' && !P.finished && cars[0] && raceT > 12) {
+        var tg = cars[0].total - pz();
+        if (tg > SEG * 116) { P.place = 2; say(L('引き離された…', 'LEFT BEHIND'), 3); sfx('bad'); end('finish'); }
+        else if (tg < -SEG * 116) { P.place = 1; say(L('引き離し勝ち！', 'PULLED AWAY — WIN!'), 3); sfx('win'); end('finish'); }
+      }
+      if (p2p && !P.finished && P.total >= goalDist) {
+        var tRun = raceT * 1000;
+        P.laps.push(tRun); P.bestLap = tRun; P.lastLap = tRun;
+        if (mode !== 'drag' && mode !== 'gymkhana') {
+          if (cfg.bestLap === null || cfg.bestLap === undefined || tRun < cfg.bestLap) { cfg.bestLap = tRun; pop(L('自己ベスト！ ', 'NEW BEST ') + fmt(tRun), '#5ccfa0'); }
+          if (mode === 'time' && rec.s.length > 5 && (!ghost || tRun < ghost.t)) newGhost = { t: Math.round(tRun), s: rec.s, x: rec.x };
+        }
+        P.place = mode === 'drag' || mode === 'touge' ? (cars.some(function (c) { return c.finished; }) ? 2 : 1) : 1 + racers().filter(function (c) { return c.finished; }).length;
+        if (mode === 'gymkhana') { say(L('ゴール！ ', 'FINISH! ') + fmt((raceT + penalty) * 1000), 3); sfx('win'); }
+        else { say(P.place === 1 ? L('勝ち！', 'YOU WIN!') : L(P.place + ' 位', 'P' + P.place), 3); sfx(P.place === 1 ? 'win' : 'lap'); }
+        end('finish');
+      }
+      recordGhost();
+      if (mode !== 'world' && mode !== 'brake' && !p2p) lapCheck();
+      modeRules(dt);
+      updateRivals(dt);
+      moveTraffic(dt);
+      dyn.forEach(function (o) { o.life -= dt; });
+      dyn = dyn.filter(function (o) { return o.life > 0; });
+
+      // 順位が上がったら知らせる
+      if (!demo && (mode === 'race' || mode === 'duel' || mode === 'elim' || mode === 'touge') && !P.finished) {
+        var rk = rank();
+        if (prevRank !== null && rk < prevRank && raceT > 2) { pop(L('▲ ' + rk + ' 位', '▲ P' + rk), '#5ccfa0'); overtakes += prevRank - rk; }
+        prevRank = rk;
+      }
+
+      skyOff += dt * pct * seg.curve * 0.0012;
+      hillOff += dt * pct * seg.curve * 0.0025;
+      eng.update({ speed: P.speed / topSpeed, throttle: keys.up || P.boosting || (mode === 'drag' && !P.finished && state === 'race'), boost: P.boosting,
+                   skid: P.skid || P.spin > 0 || (Math.abs(seg.curve) > 4 && pct > 0.75), off: (P.x < -1 || P.x > 1) && !seg.tunnel && !seg.rails,
+                   rain: weather === 'rain', rpm01: mode === 'drag' ? P.rpm : undefined });
+      // すれ違い（近くの車を抜いたときの風の音）
+      if (passT > 0) passT -= dt;
+      if (passT <= 0) cars.concat(traffic).forEach(function (c) { var gp = c.total - pz(); if (gp < 0 && gp > -SEG * 0.5 && Math.abs(c.offset - P.x) < 0.6 && P.speed > c.speed + MAX * 0.1) { eng.event('passby'); passT = 0.4; } });
+
+      if (P.boosting && Math.random() < 0.9) flame();
+      if (P.skid && Math.random() < 0.7) smoke();
+      if (P.damage > 0.6 && Math.random() < P.damage * 0.3) smoke(true);
+
+      if (P.finished && !demo) {
+        finishWait += dt;
+        var wait = (mode === 'race' || mode === 'duel' || mode === 'drag' || mode === 'touge') ? (racers().every(function (c) { return c.finished; }) || finishWait > 7) : finishWait > 1.6;
+        if (wait) settle();
+      }
+    }
+
+    function hurt(n) {
+      P.damage = Math.min(1.2, P.damage + n * dmgTaken);
+      if (mode === 'traffic' && P.damage >= 1 && !P.finished) end('wrecked');
+    }
+
+    function touchObj(o) {
+      if (o.hit && o.kind !== 'oil' && o.kind !== 'pad') return;
+      if (Math.abs(P.x - o.offset) > CAR_W + objWidth(o.kind)) return;
+      if (o.kind === 'coin') {
+        o.hit = true; coinsGot++; sfx('coin');
+        if (mode === 'coins') score = coinsGot;
+        if (cfg.onCoin) cfg.onCoin();
+        return;
+      }
+      if (o.kind === 'oil') {
+        if (P.spin <= 0 && P.speed > MAX / 5) { P.spin = 1.0; sfx('crash'); say(L('スリップ！', 'OIL SLICK!'), 1.2); combo = 0; }
+      } else if (o.kind === 'pad') {
+        if (P.padT <= 0.9) { P.padT = 1.3; P.speed = Math.max(P.speed, topSpeed * 1.05); sfx('boost'); pop(L('加速！', 'BOOST!'), '#00e5ff'); }
+      } else {
+        o.hit = true;
+        if (mode === 'gymkhana') { penalty += 2; pop(L('パイロン +2秒', 'CONE +2s'), '#ff8a80'); sfx('hit'); return; }
+        if (P.speed > MAX / 5) P.speed *= 0.8;
+        hurt(0.025); P.bump = 0.15; sfx('hit'); spark(W / 2, H - 34, 4);
+      }
+    }
+
+    function contact(c, dt) {
+      var gap = c.total - pz(), dx = c.offset - P.x, wide2 = OVERLAP * (1 + (c.wm - 1) * 0.5);
+      // 追突
+      if (gap > 0 && gap < SEG * 0.8 && Math.abs(dx) < wide2 && P.speed > c.speed) {
+        var closing = (P.speed - c.speed) / MAX;
+        if (c.isTarget && !c.caught) {
+          P.speed = c.speed * 0.92;
+          if (P.hitCool <= 0) {
+            c.hp -= clamp(0.1 + closing * 0.5, 0.1, 0.3);
+            P.hitCool = 0.5; P.bump = 0.2; flash = 0.1; sfx('crash'); spark(W / 2, H * 0.6, 12);
+            c.target = clamp(c.offset + (Math.random() < 0.5 ? -0.5 : 0.5), -0.8, 0.8);
+            if (c.hp <= 0) { c.caught = true; c.hp = 0; say(L('確保！', 'BUSTED!'), 2.5); sfx('win'); end('caught'); }
+            else pop(L('ヒット！ 残り ', 'HIT! ') + Math.round(c.hp * 100) + '%', '#ff5252');
+          }
+          return;
+        }
+        P.speed = c.speed * (c.traffic ? 0.75 : 0.9);
+        P.x += (P.x > c.offset ? 0.12 : -0.12);
+        if (!c.traffic) c.target = clamp(c.offset + (c.offset > P.x ? 0.3 : -0.3), -0.85, 0.85);
+        if (P.hitCool <= 0) {
+          hurt(c.traffic ? clamp(closing * 0.25, 0.03, 0.09) : clamp(closing * 0.12, 0.005, 0.03));
+          P.hitCool = 0.6; P.bump = c.traffic ? 0.3 : 0.2;
+          if (c.traffic) { flash = 0.12; sfx('crash'); eng.event('crash'); combo = 0; spark(W / 2, H * 0.62, 10); }
+          else { sfx('hit'); spark(W / 2, H * 0.62, 5); }
+        }
+        return;
+      }
+      // 横に並んでこすった
+      if (Math.abs(gap) < SEG * 0.5 && Math.abs(dx) < wide2 * 0.9 && !c.caught) {
+        var push = dx > 0 ? -1 : 1;
+        var hard = (c.ai === 'aggressive' || c.ability === 'ram' || c.ability === 'all') ? 2 : 1;
+        P.x += push * dt * 1.4 * hard;
+        c.offset -= push * dt * 0.8;
+        if (P.hitCool <= 0) { hurt(c.traffic ? 0.03 : 0.012 * hard); P.hitCool = 0.5; sfx('hit'); spark(W / 2 + push * -30, H - 36, 4); }
+      }
+      // ニアミス（一般車の横をすれすれで抜けた）
+      if (c.traffic && !c.passed && gap < 0) {
+        c.passed = true;
+        if (Math.abs(dx) < 0.46 && P.speed > MAX * 0.55 && P.hitCool <= 0) {
+          combo = comboT > 0 ? combo + 1 : 1; comboT = 4; nearCount++; maxCombo = Math.max(maxCombo, combo);
+          var pts = 250 * combo;
+          if (mode === 'traffic') score += pts;
+          P.nitro = Math.min(1, P.nitro + 0.08);
+          pop(L('ニアミス ×', 'NEAR MISS ×') + combo + (mode === 'traffic' ? '  +' + pts : ''), '#ffd93d');
+          sfx('coin');
+        }
+      }
+    }
+
+    function lapCheck() {
+      var lapNow = Math.floor(P.total / trackLen);
+      if (lapNow <= P.lap || P.finished) return;
+      var t = (raceT - P.lapStart) * 1000;
+      P.laps.push(t);
+      P.lastLap = t;
+      if (P.bestLap === null || t < P.bestLap) P.bestLap = t;
+      var timed = mode !== 'chase' && mode !== 'traffic' && mode !== 'coins';
+      if (mode === 'coins') segs.forEach(function (sg) { sg.objs.forEach(function (o) { o.hit = false; }); });
+      if (timed && !demo) {
+        if (cfg.bestLap === null || cfg.bestLap === undefined || t < cfg.bestLap) {
+          cfg.bestLap = t;
+          pop(L('自己ベスト！ ', 'NEW BEST LAP ') + fmt(t), '#5ccfa0');
+        } else pop(L('ラップ ', 'LAP ') + fmt(t), '#ffffff');
+        sfx('lap');
+      }
+      // ゴースト（この周が今までで一番速ければ入れ替える）
+      if (mode === 'time' && rec.s.length > 5 && (!ghost || t < ghost.t)) {
+        newGhost = { t: Math.round(t), s: rec.s, x: rec.x };
+        ghost = newGhost;
+      }
+      rec = { s: [], x: [] };
+      P.lap = lapNow;
+      P.lapStart = raceT;
+
+      if (mode === 'elim') eliminate();
+      if (mode === 'arcade') { timer += cfg.cpBonus || 10; nextCp = (P.lap * 3 + 1) * cpDist; pop(L('チェックポイント +', 'CHECKPOINT +') + Math.round(cfg.cpBonus || 10) + 's', '#56a8f5'); sfx('lap'); }
+      if (P.finished) return;
+      if (P.lap >= laps) {
+        P.place = rank();
+        if (mode === 'race' || mode === 'duel') {
+          say(P.place === 1 ? L('優勝！', 'VICTORY!') : L('ゴール！ ' + P.place + ' 位', 'FINISH! P' + P.place), 3);
+          sfx(P.place <= 3 ? 'win' : 'lap');
+        } else if (mode === 'elim') { say(L('生き残った！', 'LAST ONE STANDING!'), 3); sfx('win'); }
+        else { say(L('ゴール！', 'FINISH!'), 3); sfx('win'); }
+        end('finish');
+      } else if (P.lap === laps - 1 && laps > 1) {
+        say(L('ファイナルラップ', 'FINAL LAP'), 1.8);
+      }
+    }
+
+    function eliminate() {
+      var alive = racers();
+      if (!alive.length) return;
+      var lastC = alive.reduce(function (a, c) { return c.total < a.total ? c : a; });
+      if (lastC.total > pz()) {
+        say(L('脱落…', 'ELIMINATED'), 3); sfx('bad');
+        eliminated.push({ name: 'YOU', you: true });
+        end('eliminated');
+        return;
+      }
+      lastC.out = true; lastC.target = lastC.offset > 0 ? 1.5 : -1.5;
+      eliminated.push({ name: lastC.name, color: lastC.color });
+      pop(lastC.name + L(' 脱落！', ' ELIMINATED!'), '#ff5252');
+      sfx('flag');
+    }
+
+    function end(reason) {
+      if (P.finished) return;
+      P.finished = true;
+      P.finishTime = raceT;
+      P.endReason = reason;
+      if (!P.place) P.place = rank();
+      if (reason === 'wrecked') { say(L('大破！', 'WRECKED!'), 3); sfx('die'); }
+      if (reason === 'timeout') { say(L('タイムアップ', "TIME'S UP"), 3); sfx('bad'); }
+    }
+
+    function modeRules(dt) {
+      if (P.finished) return;
+      if (mode === 'arcade' || mode === 'chase' || mode === 'coins' || (mode === 'world' && cfg.timeLimit)) {
+        timer -= dt;
+        if (mode === 'arcade' && P.total >= nextCp) {
+          var onLine = Math.abs(P.total / trackLen - Math.round(P.total / trackLen)) < 0.01;
+          if (!onLine) { timer += cfg.cpBonus || 10; pop(L('チェックポイント +', 'CHECKPOINT +') + Math.round(cfg.cpBonus || 10) + 's', '#56a8f5'); sfx('lap'); }
+          nextCp += cpDist;
+        }
+        if (timer <= 0) { timer = 0; if (mode === 'coins') { say(L('タイムアップ！ ', "TIME'S UP! ") + coinsGot + L(' 枚', ' coins'), 3); sfx('win'); end('finish'); } else end('timeout'); }
+      }
+      if (mode === 'traffic') {
+        score += P.speed / MAX * 100 * dt * (1 + Math.min(combo, 10) * 0.1);
+        if (comboT > 0) { comboT -= dt; if (comboT <= 0) combo = 0; }
+        if (Math.floor(raceT / 20) > Math.floor((raceT - dt) / 20) && traffic.length < 40) {
+          for (var i = 0; i < 3; i++) traffic.push(newTraffic(SEG * (120 + Math.random() * 120)));
+          pop(L('交通量アップ', 'TRAFFIC UP'), '#ff9f43');
+        }
+      } else if (comboT > 0) { comboT -= dt; if (comboT <= 0) combo = 0; }
+    }
+
+    /* --- ライバルの頭脳 --- */
+    function updateRivals(dt) {
+      if (mode === 'drag') {
+        cars.forEach(function (c) {
+          if (state !== 'race') return;
+          var tgt = c.max * (c.total - PLAYER_Z < dragLen ? 1 : 0.4);
+          c.speed += (c.speed < tgt ? MAX / 3.4 * (1.2 - c.speed / c.max * 0.6) : -MAX / 2) * dt;
+          c.speed = clamp(c.speed, 0, c.max);
+          c.total += c.speed * dt;
+          if (!c.finished && c.total - PLAYER_Z >= goalDist) { c.finished = true; c.finishTime = raceT; }
+        });
+        return;
+      }
+      cars.forEach(function (c) {
+        if (c.out) {
+          c.speed = Math.max(0, c.speed - MAX * 0.5 * dt);
+          c.total += c.speed * dt;
+          c.offset += clamp(c.target - c.offset, -dt, dt);
+          return;
+        }
+        if (c.caught) { c.speed = Math.max(0, c.speed - MAX * 0.8 * dt); c.total += c.speed * dt; return; }
+        var cs = findSeg(c.total + SEG * 6), curv = Math.abs(cs.curve);
+        var cp = c.ai === 'technician' ? 0.5 : c.ai === 'speedster' ? 1.6 : 1;
+        var target = c.max * (1 - curv * 0.022 * (1.2 - c.skill) * cp) * ({ rain: 0.97, snow: 0.94 }[weather] || 1);
+        var gap = pz() - c.total;
+        if (!P.finished) {
+          if (c.isTarget) {
+            if (gap < -SEG * 300) target *= 0.72;
+            else if (gap < -SEG * 140) target *= 0.85;
+            else if (gap > -SEG * 12) target *= 1.02;
+          } else if (gap > SEG * 60) target *= c.boss ? 1.18 : 1.12;
+          else if (gap > SEG * 25) target *= c.boss ? 1.1 : 1.06;
+          else if (gap < -SEG * 60) target *= c.boss ? 0.97 : 0.93;
+        }
+        // ニトロ
+        var burstAb = c.ability === 'burst' || c.ability === 'all';
+        if (c.boostT > 0) { c.boostT -= dt; target *= c.burst; }
+        else if (state === 'race' && curv < 0.6) {
+          if (burstAb && Math.random() < 0.3 * dt) { c.boostT = 2.6; c.burst = 1.24; }
+          else if (Math.random() < 0.12 * dt * c.skill * (c.ai === 'nitro' ? 2.5 : 1)) { c.boostT = 1.2 + Math.random(); c.burst = 1.14; }
+        }
+        c.speed += (c.speed < target ? MAX / (c.boss || mode === 'touge' ? 4 : 5.5) : -MAX / 3) * dt;
+        c.speed = clamp(c.speed, 0, c.max * 1.3);
+        if (state === 'race') c.total += c.speed * dt;
+
+        // 前の車をよける
+        var blocked = false;
+        cars.concat(traffic).forEach(function (o) {
+          if (o === c || o.out) return;
+          var d = o.total - c.total;
+          if (d > 0 && d < SEG * 5 && Math.abs(o.offset - c.offset) < OVERLAP * 1.3 * (o.wm || 1) && o.speed < c.speed) blocked = true;
+        });
+        var dp = pz() - c.total;
+        if (dp > 0 && dp < SEG * 5 && Math.abs(P.x - c.offset) < OVERLAP * 1.3) blocked = true;
+        if (blocked) c.target = c.offset > 0 ? c.offset - 0.6 : c.offset + 0.6;
+
+        var behind = c.total - pz();   // 正なら自車が後ろ
+        // 進路をふさぐ
+        var blockAb = c.ai === 'blocker' || c.ability === 'block' || c.ability === 'all';
+        if (blockAb && !blocked && behind > 0 && behind < SEG * 10 && !P.finished) {
+          c.blockT -= dt;
+          if (c.blockT < 0) c.blockT = Math.random() < (c.boss ? 0.7 : 0.45) ? 1.5 : -1.2;
+          if (c.blockT > 0) c.target = clamp(P.x, -0.8, 0.8);
+        }
+        // 体当たり
+        var ramAb = c.ai === 'aggressive' || c.ability === 'ram' || c.ability === 'all';
+        if (ramAb && Math.abs(behind) < SEG * 1.5 && Math.random() < (c.ability ? 0.9 : 0.35) * dt) c.target = clamp(P.x, -0.85, 0.85);
+        // オイル
+        if ((c.ability === 'oil' || c.ability === 'all') && state === 'race' && !P.finished) {
+          c.oilT -= dt;
+          if (c.oilT <= 0 && behind > SEG * 4 && behind < SEG * 60) {
+            dyn.push({ kind: 'oil', z: c.total - SEG * 0.6, offset: c.offset, life: 24 });
+            c.oilT = 5 + Math.random() * 4;
+            pop(c.name + L(' がオイルをまいた！', ' dropped oil!'), '#b388ff');
+          }
+        }
+        // 逃走車は車線を変えながら逃げる
+        if (c.isTarget) {
+          c.laneT -= dt;
+          if (c.laneT <= 0) { c.target = LANE_X[Math.floor(Math.random() * 3)]; c.laneT = 1.5 + Math.random() * 2; }
+        }
+        if (!blocked && !c.isTarget && Math.random() < 0.01) c.target = clamp(-cs.curve * 0.12 + (Math.random() - 0.5) * 0.6, -0.8, 0.8);
+        c.target = clamp(c.target, -0.85, 0.85);
+        c.offset += clamp(c.target - c.offset, -dt * (c.boss ? 1.1 : 0.9), dt * (c.boss ? 1.1 : 0.9));
+
+        if (p2p) { if (!c.finished && c.total - PLAYER_Z >= goalDist) { c.finished = true; c.finishTime = raceT; c.max *= 0.5; } }
+        else {
+          var cl = Math.floor((c.total - PLAYER_Z) / trackLen);
+          if (laps !== Infinity && cl >= laps && !c.finished) { c.finished = true; c.finishTime = raceT; }
+        }
+      });
+    }
+
+    function moveTraffic(dt) {
+      traffic.forEach(function (t) {
+        if (state === 'race') t.total += t.speed * dt;
+        if (t.total < pz() - SEG * 15) {
+          var dens = mode === 'traffic' ? clamp(1 - raceT / 240, 0.55, 1) : 1;
+          var n = newTraffic(SEG * (150 + Math.random() * 130) * dens);
+          for (var k in n) t[k] = n[k];
+        }
+      });
+    }
+
+    function recordGhost() {
+      var el = raceT - P.lapStart;
+      while (rec.s.length <= el / 0.1 && rec.s.length < 3000) {
+        rec.s.push(Math.round((P.total - P.lap * trackLen) / 10));
+        rec.x.push(Math.round(P.x * 100));
+      }
+    }
+    function ghostPos() {
+      if (!ghost || mode !== 'time' || P.finished) return null;
+      var el = (raceT - P.lapStart) / 0.1, i = Math.floor(el), f = el - i;
+      if (i >= ghost.s.length - 1) return null;
+      var d = lerp(ghost.s[i], ghost.s[i + 1], f) * 10;
+      return { total: P.lap * trackLen + PLAYER_Z + d, offset: lerp(ghost.x[i], ghost.x[i + 1], f) / 100 };
+    }
+
+    function settle() {
+      if (state === 'results') return;
+      state = 'results';
+      var list = [{ name: 'YOU', you: true, time: P.endReason === 'finish' ? P.finishTime : null, total: pz() }].concat(racers().map(function (c) {
+        return { name: c.name, color: c.color, boss: c.boss, time: c.finished ? c.finishTime : null, total: c.total };
+      }));
+      list.sort(function (a, b) {
+        if (a.time !== null && b.time !== null) return a.time - b.time;
+        if (a.time !== null) return -1;
+        if (b.time !== null) return 1;
+        return b.total - a.total;
+      });
+      if (mode === 'elim') list = list.concat(eliminated.filter(function (e) { return !e.you; }).reverse().map(function (e) { return { name: e.name, color: e.color, time: null, out: true }; }));
+      if (mode === 'elim' && P.endReason === 'eliminated') list = list.filter(function (e) { return !e.you; }).concat([{ name: 'YOU', you: true, time: null, out: true }]);
+      var place = list.findIndex(function (r) { return r.you; }) + 1;
+      result = {
+        mode: mode, track: cfg.track, place: place, list: list, reason: P.endReason,
+        time: P.finishTime, best: P.bestLap, laps: P.laps.slice(), score: Math.round(score), near: nearCount,
+        maxCombo: maxCombo, caught: !!(targetCar && targetCar.caught), damage: P.damage, topKmh: topKmh,
+        overtakes: overtakes, ghost: newGhost, km: R._km || 0, field: cars.length, coins: coinsGot,
+        stopDist: P.stopDist, maxKmh: kmh(P.maxSpeed), penalty: penalty, total: (mode === 'gymkhana' ? (P.finishTime || 0) + penalty : P.finishTime)
+      };
+      R._km = 0;
+      eng.stop();
+      if (cfg.onFinish) cfg.onFinish(result);
+    }
+
+    /* --- 粒（煙・火花・砂ぼこり） --- */
+    function part(x, y, vx, vy, life, color, size, grav) {
+      if (cfg.tui || parts.length > 160) return;
+      parts.push({ x: x, y: y, vx: vx, vy: vy, life: life, max: life, color: color, size: size, g: grav || 0 });
+    }
+    function updateParts(dt) {
+      parts.forEach(function (p) { p.x += p.vx * dt; p.y += p.vy * dt; p.vy += p.g * dt; p.life -= dt; });
+      parts = parts.filter(function (p) { return p.life > 0; });
+    }
+    function spark(x, y, n) { for (var i = 0; i < n; i++) part(x + (Math.random() - 0.5) * 30, y, (Math.random() - 0.5) * 260, -Math.random() * 180, 0.4, '#ffd54f', 2, 500); }
+    function dust() {
+      var c = spec.weather === 'snow' || weather === 'snow' ? '#ffffff' : pal.grass[0];
+      part(W / 2 + (Math.random() - 0.5) * 60, H - 12, (Math.random() - 0.5) * 80, -40 - Math.random() * 40, 0.6, c, 5, 40);
+    }
+    function smoke(black) {
+      part(W / 2 + (Math.random() - 0.5) * 50, H - 16, (Math.random() - 0.5) * 50, -30 - Math.random() * 30, 0.8, black ? 'rgba(40,40,40,.6)' : 'rgba(220,220,220,.5)', 7, -10);
+    }
+    function flame() { part(W / 2 + (Math.random() < 0.5 ? -16 : 16), H - 18, (Math.random() - 0.5) * 30, 40 + Math.random() * 40, 0.25, Math.random() < 0.5 ? '#5ab4ff' : '#ffffff', 3, 0); }
+
+    /* =====================================================================
+       GUI の描画
+       ===================================================================== */
+    var cache = {};
+    function render(g) {
+      useGeom();
+      W = sess.W; H = sess.H;
+      var shake = P.bump > 0 ? (Math.random() - 0.5) * 6 * P.bump / 0.3 : 0;
+      g.save();
+      if (shake) g.translate(shake, shake * 0.5);
+
+      var base = findSeg(P.pos);
+      var basePct = (P.pos % SEG) / SEG;
+      var pSeg = findSeg(pz());
+      var pPct = (((pz() % trackLen) + trackLen) % trackLen % SEG) / SEG;
+      var pY = lerp(pSeg.p1.world.y, pSeg.p2.world.y, pPct);
+      var maxy = H, x = 0, dx = -(base.curve * basePct), n;
+
+      drawSky(g);
+
+      // 道路（手前から奥へ）
+      for (n = 0; n < DRAW; n++) {
+        var s = segs[(base.index + n) % segs.length];
+        var looped = s.index < base.index;
+        s.fog = 1 / Math.pow(Math.E, Math.pow(n / DRAW, 2) * fogDensity);
+        s.clip = maxy;
+        s.drawn = false;
+        project(s.p1, (P.x * ROAD_W) - x, pY + CAM_H, P.pos - (looped ? trackLen : 0));
+        project(s.p2, (P.x * ROAD_W) - x - dx, pY + CAM_H, P.pos - (looped ? trackLen : 0));
+        x += dx; dx += s.curve;
+        if (s.p1.camera.z <= DEPTH || s.p2.screen.y >= s.p1.screen.y || s.p2.screen.y >= maxy) continue;
+        s.drawn = true;
+        drawSegment(g, s);
+        maxy = s.p2.screen.y;
+      }
+
+      // 飾り・物・車（奥から手前へ）
+      var bySeg = {};
+      function addTo(obj, total, kind) {
+        var z = ((total % trackLen) + trackLen) % trackLen, idx = Math.floor(z / SEG);
+        (bySeg[idx] = bySeg[idx] || []).push({ o: obj, pct: (z % SEG) / SEG, kind: kind });
+      }
+      cars.forEach(function (c) { if (c.total - pz() > -SEG * 0.3 && !(c.out && c.speed < 1)) addTo(c, c.total, 'car'); });
+      traffic.forEach(function (c) { if (c.total - pz() > -SEG * 0.3) addTo(c, c.total, 'car'); });
+      var gp = ghostPos();
+      if (gp && gp.total - pz() > SEG * 0.4) addTo({ ghost: true, offset: gp.offset, body: car.body, color: car.color }, gp.total, 'car');
+      dyn.forEach(function (o) { addTo(o, o.z, 'dyn'); });
+
+      for (n = DRAW - 1; n > 0; n--) {
+        var sg = segs[(base.index + n) % segs.length];
+        if (!sg.p1.screen.scale || sg.p1.camera.z <= DEPTH) continue;
+        var scale = sg.p1.screen.scale;
+        if (sg.tunnel) drawTunnel(g, sg, segs[(sg.index + segs.length - 1) % segs.length]);
+        else if (sg.rails && sg.drawn) drawRails(g, sg);
+        g.save();
+        g.beginPath(); g.rect(0, 0, W, sg.clip); g.clip();
+        sg.objs.forEach(function (o) {
+          drawObj(g, o, sg.p1.screen.x + (scale * o.offset * ROAD_W * W / 2), sg.p1.screen.y, sg.p1.screen.w, t0);
+        });
+        sg.sprites.forEach(function (sp) {
+          var sx = sg.p1.screen.x + (scale * sp.offset * ROAD_W * W / 2);
+          drawSprite(g, sp, sx, sg.p1.screen.y, sg.p1.screen.w, night, t0);
+        });
+        (bySeg[sg.index] || []).forEach(function (e) {
+          var o = e.o;
+          var sc2 = lerp(sg.p1.screen.scale, sg.p2.screen.scale, e.pct);
+          var cx = lerp(sg.p1.screen.x, sg.p2.screen.x, e.pct) + (sc2 * o.offset * ROAD_W * W / 2);
+          var cy = lerp(sg.p1.screen.y, sg.p2.screen.y, e.pct);
+          if (e.kind === 'dyn') { drawObj(g, o, cx, cy, lerp(sg.p1.screen.w, sg.p2.screen.w, e.pct), t0); return; }
+          var cw = sc2 * CAR_W * 2 * ROAD_W * W / 2;
+          if (cw < 2) return;
+          if (o.ghost) g.globalAlpha = 0.4;
+          drawCar(g, cx, cy, cw, o.color, o.body, {
+            brake: o.traffic ? false : o.speed < o.max * 0.8, boost: o.boostT > 0, t: t0,
+            label: !o.traffic && !o.ghost && cw > 30 ? o.name : (o.ghost && cw > 30 ? 'GHOST' : ''), boss: o.boss && cw > 30
+          });
+          g.globalAlpha = 1;
+          if (night && o.traffic && cw > 6) {   // 夜の一般車のテールランプの光
+            g.fillStyle = 'rgba(255,40,40,.35)'; g.fillRect(cx - cw * 0.6, cy - cw * 0.45, cw * 1.2, cw * 0.12);
+          }
+        });
+        g.restore();
+      }
+
+      // 夜はヘッドライトで前を照らす
+      if (night || pSeg.tunnel) {
+        g.save();
+        g.globalCompositeOperation = 'lighter';
+        g.translate(W / 2, H * 0.76); g.scale(1, 0.32);
+        if (!cache.head) {
+          cache.head = g.createRadialGradient(0, 0, 0, 0, 0, W * 0.42);
+          cache.head.addColorStop(0, 'rgba(255,240,200,.28)'); cache.head.addColorStop(1, 'rgba(255,240,200,0)');
+        }
+        g.fillStyle = cache.head;
+        g.beginPath(); g.arc(0, 0, W * 0.42, 0, Math.PI * 2); g.fill();
+        g.restore();
+      }
+
+      // 自車
+      var off = P.x < -1 || P.x > 1;
+      var bounce = (P.speed > 0 ? (Math.random() - 0.5) * 2 * (off ? 2 : 0.6) : 0) + (P.bump > 0 ? Math.sin(raceT * 60) * 3 : 0);
+      var lean = keys.left ? -1 : keys.right ? 1 : 0;
+      var myW = (DEPTH / PLAYER_Z) * CAR_W * 2 * ROAD_W * W / 2;
+      var spinX = P.spin > 0 ? Math.sin(raceT * 20) * 10 : 0;
+      drawCar(g, W / 2 + spinX, H - 14 + bounce, myW, car.color, car.body, { brake: keys.down, boost: P.boosting, lean: lean, t: t0, siren: car.siren });
+      parts.forEach(function (p) {
+        g.globalAlpha = clamp(p.life / p.max, 0, 1);
+        g.fillStyle = p.color;
+        var sz = p.size * (p.g < 0 ? 2 - p.life / p.max : 1);
+        g.fillRect(p.x - sz / 2, p.y - sz / 2, sz, sz);
+      });
+      g.globalAlpha = 1;
+
+      drawWeather(g);
+      if (P.boosting || P.padT > 0) speedLines(g);
+      if (flash > 0) { g.fillStyle = 'rgba(255,255,255,' + (flash * 2) + ')'; g.fillRect(0, 0, W, H); }
+      if (!cache.vig) {
+        cache.vig = g.createRadialGradient(W / 2, H * 0.55, Math.min(W, H) * 0.35, W / 2, H * 0.55, Math.max(W, H) * 0.75);
+        cache.vig.addColorStop(0, 'rgba(0,0,0,0)'); cache.vig.addColorStop(1, 'rgba(0,0,0,.38)');
+      }
+      g.fillStyle = cache.vig; g.fillRect(0, 0, W, H);
+      g.restore();
+      if (!demo) drawHud(g);
+    }
+
+    function drawSky(g) {
+      if (!cache.sky) {
+        cache.sky = g.createLinearGradient(0, 0, 0, H * 0.62);
+        cache.sky.addColorStop(0, pal.sky[0]); cache.sky.addColorStop(0.55, pal.sky[1]); cache.sky.addColorStop(1, pal.sky[2]);
+      }
+      g.fillStyle = cache.sky; g.fillRect(0, 0, W, H);
+      var orb = pal.sun || pal.moon;
+      if (orb && weather !== 'fog' && weather !== 'rain') {
+        var ox = ((orb.x * W - skyOff * 400) % (W * 1.5) + W * 1.5) % (W * 1.5) - W * 0.25, oy = orb.y * H;
+        var r = orb.r * H / 360;
+        var gl = g.createRadialGradient(ox, oy, r * 0.5, ox, oy, r * 4);
+        gl.addColorStop(0, rgba(orb.c, pal.sun ? 0.55 : 0.3)); gl.addColorStop(1, rgba(orb.c, 0));
+        g.fillStyle = gl; g.beginPath(); g.arc(ox, oy, r * 4, 0, Math.PI * 2); g.fill();
+        circle(g, ox, oy, r, orb.c);
+        if (pal.moon) circle(g, ox + r * 0.35, oy - r * 0.2, r * 0.85, pal.sky[0]);
+      }
+      if (night) {
+        g.fillStyle = 'rgba(255,255,255,.7)';
+        for (var st2 = 0; st2 < 50; st2++) {
+          var sx = ((st2 * 97 + skyOff * 800) % W + W) % W, sy = (st2 * 53) % (H * 0.4);
+          g.fillRect(sx, sy, st2 % 7 ? 1 : 2, st2 % 7 ? 1 : 2);
+        }
+      } else if (weather === 'clear' || weather === 'sand') {
+        g.fillStyle = 'rgba(255,255,255,.8)';
+        for (var cl = 0; cl < 5; cl++) {
+          var cx = ((cl * 170 + skyOff * 600 + t0 * 4) % (W + 120) + W + 120) % (W + 120) - 60;
+          g.beginPath(); g.ellipse(cx, H * 0.1 + (cl % 3) * H * 0.05, 34, 9, 0, 0, Math.PI * 2); g.fill();
+          g.beginPath(); g.ellipse(cx + 18, H * 0.1 + (cl % 3) * H * 0.05 - 5, 20, 8, 0, 0, Math.PI * 2); g.fill();
+        }
+      }
+      if (spec.lava) {
+        var lg = g.createLinearGradient(0, H * 0.35, 0, H * 0.56);
+        lg.addColorStop(0, 'rgba(255,90,0,0)'); lg.addColorStop(1, 'rgba(255,90,0,.45)');
+        g.fillStyle = lg; g.fillRect(0, H * 0.35, W, H * 0.21);
+      }
+      if (!cache.farC) { cache.farC = mix(pal.far, pal.fog, 0.45); cache.midC = mix(pal.hill, pal.fog, 0.3); }
+      if ((spec.landmarks || []).indexOf('fuji') >= 0) {
+        var fx = ((W * 0.62 - skyOff * 500) % (W * 1.6) + W * 1.6) % (W * 1.6) - W * 0.3, fy = H * 0.5, fw = W * 0.28, fh = H * 0.24;
+        poly(g, fx - fw, fy, fx + fw, fy, fx + fw * 0.16, fy - fh, fx - fw * 0.16, fy - fh, mix('#5d7896', pal.fog, 0.35));
+        poly(g, fx - fw * 0.34, fy - fh * 0.62, fx + fw * 0.34, fy - fh * 0.62, fx + fw * 0.16, fy - fh, fx - fw * 0.16, fy - fh, '#f4f7fb');
+      }
+      if (spec.skyline) drawSkyline(g, cache.farC, H * 0.52, skyOff * 900);
+      else { drawRange(g, mix(pal.far, pal.fog, 0.65), H * 0.49, H * 0.13, skyOff * 600, 3); drawRange(g, cache.farC, H * 0.5, H * 0.105, skyOff * 900, 7); }
+      drawRange(g, cache.midC, H * 0.53, H * 0.072, hillOff * 1200, 13);
+      if (!cache.haze) {
+        cache.haze = g.createLinearGradient(0, H * 0.34, 0, H * 0.56);
+        cache.haze.addColorStop(0, rgba(pal.fog, 0)); cache.haze.addColorStop(1, rgba(pal.fog, night ? 0.25 : 0.55));
+      }
+      g.fillStyle = cache.haze; g.fillRect(0, H * 0.34, W, H * 0.22);
+      if (spec.lava) {
+        g.fillStyle = 'rgba(255,120,0,.8)';
+        for (var v = 0; v < 3; v++) { var vx = ((v * 230 + hillOff * 1200 * 0.5) % (W + 100) + W + 100) % (W + 100) - 50; g.fillRect(vx, H * 0.5 - 2, 3, 6 + Math.sin(t0 * 4 + v) * 3); }
+      }
+    }
+
+    function drawRange(g, color, baseY, amp, off, seed) {
+      g.fillStyle = color;
+      g.beginPath();
+      g.moveTo(0, H);
+      for (var i = 0; i <= W; i += 8) {
+        var tt = (i + off) * 0.012 * 640 / W;
+        var y = baseY - (Math.sin(tt + seed) * 0.5 + Math.sin(tt * 2.3 + seed * 1.7) * 0.3 + 0.6) * amp;
+        g.lineTo(i, y);
+      }
+      g.lineTo(W, H);
+      g.closePath();
+      g.fill();
+    }
+    function drawSkyline(g, color, baseY, off) {
+      g.fillStyle = color;
+      var bw = W / 16;
+      for (var i = -1; i < 18; i++) {
+        var k = Math.floor((i * bw - off) / bw), hh = (20 + ((k * 37) % 50 + 50) % 50) * H / 360;
+        var x = i * bw + (((-off) % bw) + bw) % bw - bw;
+        g.fillStyle = color; g.fillRect(x, baseY - hh, bw - 2, hh + H);
+        if (night) {
+          for (var y = 4; y < hh - 4; y += 6) for (var wx = 3; wx < bw - 6; wx += 6) {
+            if (((k * 13 + y * 7 + wx) % 5 + 5) % 5 === 0) { g.fillStyle = 'rgba(255,215,106,.6)'; g.fillRect(x + wx, baseY - hh + y, 2, 2); }
+          }
+        }
+      }
+    }
+
+    function drawSegment(g, s) {
+      var x1 = s.p1.screen.x, y1 = s.p1.screen.y, w1 = s.p1.screen.w;
+      var x2 = s.p2.screen.x, y2 = s.p2.screen.y, w2 = s.p2.screen.w;
+      var r1 = w1 / 6, r2 = w2 / 6, l1 = w1 / 32, l2 = w2 / 32;
+      g.fillStyle = s.cGrass;
+      g.fillRect(0, y2 - 1, W, y1 - y2 + 1);
+      if (s.waterSide && !s.tunnel) {
+        var wc = s.alt ? pal.water : shade(pal.water, 1.08);
+        if (s.waterSide === 'left') poly(g, -2, y1, x1 - w1 * 1.7, y1, x2 - w2 * 1.7, y2, -2, y2, wc);
+        else poly(g, W + 2, y1, x1 + w1 * 1.7, y1, x2 + w2 * 1.7, y2, W + 2, y2, wc);
+      }
+      if (spec.neon && s.index % 4 === 0) { g.fillStyle = 'rgba(0,229,255,.35)'; g.fillRect(0, y2, W, 1); }
+      poly(g, x1 - w1 - r1, y1, x1 - w1, y1, x2 - w2, y2, x2 - w2 - r2, y2, s.cRumble);
+      poly(g, x1 + w1 + r1, y1, x1 + w1, y1, x2 + w2, y2, x2 + w2 + r2, y2, s.cRumble);
+      if (s.finishLine) {
+        var cells = 12;
+        for (var k = 0; k < cells; k++) {
+          var a1 = x1 - w1 + (w1 * 2 / cells) * k, a2 = x2 - w2 + (w2 * 2 / cells) * k;
+          poly(g, a1, y1, a1 + w1 * 2 / cells, y1, a2 + w2 * 2 / cells, y2, a2, y2, (k + s.index) % 2 ? '#111' : '#f5f5f5');
+        }
+      } else {
+        poly(g, x1 - w1, y1, x1 + w1, y1, x2 + w2, y2, x2 - w2, y2, s.stopZone ? '#b71c1c' : s.cRoad);
+        if (s.alt) {
+          var lw1 = w1 * 2 / LANES, lw2 = w2 * 2 / LANES, lx1 = x1 - w1 + lw1, lx2 = x2 - w2 + lw2;
+          for (var lane = 1; lane < LANES; lane++, lx1 += lw1, lx2 += lw2) {
+            poly(g, lx1 - l1 / 2, y1, lx1 + l1 / 2, y1, lx2 + l2 / 2, y2, lx2 - l2 / 2, y2, pal.lane);
+          }
+        }
+        if (w1 > 60) {   // 路肩の白線
+          poly(g, x1 - w1 * 0.97, y1, x1 - w1 * 0.94, y1, x2 - w2 * 0.94, y2, x2 - w2 * 0.97, y2, 'rgba(255,255,255,.55)');
+          poly(g, x1 + w1 * 0.94, y1, x1 + w1 * 0.97, y1, x2 + w2 * 0.97, y2, x2 + w2 * 0.94, y2, 'rgba(255,255,255,.55)');
+        }
+      }
+      if (s.fog < 1) {
+        g.globalAlpha = 1 - s.fog;
+        g.fillStyle = pal.fog;
+        g.fillRect(0, y2, W, y1 - y2);
+        g.globalAlpha = 1;
+      }
+    }
+
+    function drawRails(g, s) {
+      var a = s.p1.screen, b = s.p2.screen, h1 = a.scale * 380 * H / 2, h2 = b.scale * 380 * H / 2;
+      var f = 0.45 + 0.55 * (s.fog === undefined ? 1 : s.fog);
+      [-1, 1].forEach(function (sd) {
+        var x1 = a.x + sd * a.w * 1.1, x2 = b.x + sd * b.w * 1.1;
+        poly(g, x1, a.y - h1, x2, b.y - h2, x2, b.y - h2 * 0.55, x1, a.y - h1 * 0.55, shade('#c9ced4', f));
+        poly(g, x1, a.y - h1 * 0.55, x2, b.y - h2 * 0.55, x2, b.y - h2 * 0.45, x1, a.y - h1 * 0.45, shade('#7d848c', f));
+        if (s.index % 2 === 0) { g.fillStyle = shade('#6d737a', f); g.fillRect(x1 - Math.max(1, h1 * 0.08), a.y - h1, Math.max(1, h1 * 0.16), h1); }
+      });
+    }
+
+    function drawTunnel(g, s, prev) {
+      var y1 = s.p1.screen.y, y2 = s.p2.screen.y, x1 = s.p1.screen.x, x2 = s.p2.screen.x, w1 = s.p1.screen.w, w2 = s.p2.screen.w;
+      var c1 = y1 - s.p1.screen.scale * TUNNEL_H * H / 2, c2 = y2 - s.p2.screen.scale * TUNNEL_H * H / 2;
+      var wl1 = x1 - w1 * 1.2, wl2 = x2 - w2 * 1.2, wr1 = x1 + w1 * 1.2, wr2 = x2 + w2 * 1.2;
+      var wall = pal.wall || '#333', f = s.fog === undefined ? 1 : s.fog;
+      var col = shade(wall, (s.alt ? 1 : 0.88) * (0.45 + 0.55 * f));
+      g.fillStyle = col;
+      g.beginPath(); g.moveTo(-5, y1); g.lineTo(wl1, y1); g.lineTo(wl2, y2); g.lineTo(wl2, c2); g.lineTo(wl1, c1); g.lineTo(-5, c1); g.closePath(); g.fill();
+      g.beginPath(); g.moveTo(W + 5, y1); g.lineTo(wr1, y1); g.lineTo(wr2, y2); g.lineTo(wr2, c2); g.lineTo(wr1, c1); g.lineTo(W + 5, c1); g.closePath(); g.fill();
+      poly(g, wl1, c1, wr1, c1, wr2, c2, wl2, c2, shade(wall, 0.6 * (0.45 + 0.55 * f)));
+      g.fillStyle = shade(wall, 0.6); g.fillRect(-5, c1 - (y1 - c1), W + 10, y1 - c1 > 0 ? (y1 - c1) : 0);
+      if (s.index % 6 === 0) {   // 天井の照明
+        var lw = w1 * 0.3;
+        g.fillStyle = '#ffe9a3'; g.fillRect(x1 - lw / 2, c1 + (c2 - c1) * 0.2, lw, Math.max(1, (c2 - c1) * 0.4 + 1));
+        g.fillStyle = 'rgba(255,200,80,.9)';
+        g.fillRect(wl1 + (x1 - wl1) * 0.02, c1 + (y1 - c1) * 0.3, Math.max(1, w1 * 0.03), Math.max(1, (y1 - c1) * 0.06));
+        g.fillRect(wr1 - (wr1 - x1) * 0.02 - Math.max(1, w1 * 0.03), c1 + (y1 - c1) * 0.3, Math.max(1, w1 * 0.03), Math.max(1, (y1 - c1) * 0.06));
+      }
+      if (prev && !prev.tunnel) {   // 入口の壁
+        g.fillStyle = shade(wall, 1.1);
+        g.fillRect(-5, -5, W + 10, c1 + 5);
+        g.fillRect(-5, c1, wl1 + 5, y1 - c1);
+        g.fillRect(wr1, c1, W - wr1 + 5, y1 - c1);
+        g.fillStyle = 'rgba(0,0,0,.25)'; g.fillRect(wl1, c1, wr1 - wl1, Math.max(1, (y1 - c1) * 0.06));
+      }
+    }
+
+    // 雨粒・雪・砂・灰（画面の決まった位置から、時間で流す）
+    function drawWeather(g) {
+      var i, n, x, y;
+      if (weather === 'rain') {
+        g.strokeStyle = 'rgba(200,220,255,.45)'; g.lineWidth = 1;
+        g.beginPath();
+        n = 140;
+        for (i = 0; i < n; i++) {
+          x = ((i * 73.3 + t0 * 120 - skyOff * 600) % W + W) % W;
+          y = ((i * 41.7 + t0 * (700 + (i % 5) * 60)) % H + H) % H;
+          g.moveTo(x, y); g.lineTo(x - 3, y + 12 + P.speed / MAX * 8);
+        }
+        g.stroke();
+        g.fillStyle = 'rgba(40,50,70,.12)'; g.fillRect(0, 0, W, H);
+        if (Math.sin(t0 * 0.7) > 0.995) { g.fillStyle = 'rgba(255,255,255,.3)'; g.fillRect(0, 0, W, H); }
+      } else if (weather === 'snow') {
+        g.fillStyle = 'rgba(255,255,255,.85)';
+        for (i = 0; i < 110; i++) {
+          x = ((i * 91.3 + Math.sin(t0 + i) * 20 - skyOff * 700 + (i % 3) * t0 * 20) % W + W) % W;
+          y = ((i * 57.1 + t0 * (60 + (i % 4) * 25) * (1 + P.speed / MAX)) % H + H) % H;
+          g.fillRect(x, y, i % 3 ? 2 : 3, i % 3 ? 2 : 3);
+        }
+      } else if (weather === 'sand') {
+        g.fillStyle = 'rgba(230,180,110,.16)'; g.fillRect(0, 0, W, H);
+        g.fillStyle = 'rgba(240,200,140,.6)';
+        for (i = 0; i < 70; i++) {
+          x = ((i * 67.1 - t0 * (300 + (i % 4) * 80)) % W + W) % W; y = (i * 37.3) % H;
+          g.fillRect(x, y, 4, 1);
+        }
+      } else if (weather === 'ash') {
+        for (i = 0; i < 70; i++) {
+          x = ((i * 83.1 + Math.sin(t0 * 0.8 + i) * 25) % W + W) % W;
+          y = (((i * 47.9 - t0 * (30 + (i % 3) * 15)) % H) + H) % H;
+          g.fillStyle = i % 4 ? 'rgba(160,160,160,.6)' : 'rgba(255,140,40,.9)';
+          g.fillRect(x, y, 2, 2);
+        }
+      } else if (weather === 'fog') {
+        g.fillStyle = 'rgba(200,208,216,.14)'; g.fillRect(0, 0, W, H);
+      }
+    }
+
+    function speedLines(g) {
+      g.strokeStyle = 'rgba(255,255,255,.35)'; g.lineWidth = 1;
+      g.beginPath();
+      for (var i = 0; i < 18; i++) {
+        var a = (i / 18) * Math.PI * 2 + t0 * 3, r0 = W * (0.35 + ((i * 37 + Math.floor(t0 * 30)) % 10) / 40);
+        var cx = W / 2 + Math.cos(a) * r0, cy = H * 0.5 + Math.sin(a) * r0 * 0.6;
+        g.moveTo(cx, cy); g.lineTo(cx + Math.cos(a) * 40, cy + Math.sin(a) * 24);
+      }
+      g.stroke();
+    }
+
+    /* ---------- HUD ---------- */
+    function panel(g, x, y, w, h) {
+      g.fillStyle = 'rgba(8,12,20,.62)'; g.fillRect(x, y, w, h);
+      g.strokeStyle = 'rgba(255,255,255,.18)'; g.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+    }
+    function text(g, t, x, y, size, color, align) {
+      g.font = 'bold ' + size + 'px ui-monospace, Menlo, Consolas, monospace';
+      g.textAlign = align || 'left';
+      g.fillStyle = 'rgba(0,0,0,.6)'; g.fillText(t, x + 1, y + 1);
+      g.fillStyle = color || '#fff'; g.fillText(t, x, y);
+    }
+    function meter(g, x, y, w, h, v, color, label) {
+      g.fillStyle = 'rgba(255,255,255,.12)'; g.fillRect(x, y, w, h);
+      g.fillStyle = color; g.fillRect(x, y, w * clamp(v, 0, 1), h);
+      text(g, label, x, y - 3, 9, '#cfd8e3');
+    }
+
+    function drawHud(g) {
+      var k = Math.max(1, Math.min(W / 640, H / 360)), W0 = W, H0 = H;
+      g.save(); g.scale(k, k); W = W0 / k; H = H0 / k;
+      try { hud0(g); } finally { g.restore(); W = W0; H = H0; }
+    }
+    function hud0(g) {
+      var narrow = W < 500;
+      var racing = mode === 'race' || mode === 'duel' || mode === 'elim' || mode === 'touge';
+      var place = P.finished && P.place ? P.place : rank();
+
+      // 左上: 順位・周回（モードで中身が変わる）
+      panel(g, 8, 8, narrow ? 104 : 124, 50);
+      if (racing) {
+        text(g, L('順位', 'POS'), 16, 22, 10, '#9fb0c2');
+        text(g, place + '/' + (racers().length + 1), 16, 50, narrow ? 20 : 24, place === 1 ? '#ffd93d' : '#fff');
+      } else if (mode === 'coins') {
+        text(g, L('コイン', 'COINS'), 16, 22, 10, '#9fb0c2');
+        text(g, String(coinsGot), 16, 50, 22, '#ffd54f');
+      } else if (mode === 'traffic') {
+        text(g, L('点数', 'SCORE'), 16, 22, 10, '#9fb0c2');
+        text(g, String(Math.round(score)), 16, 50, narrow ? 16 : 20, '#ffd93d');
+      } else {
+        text(g, L('モード', 'MODE'), 16, 22, 10, '#9fb0c2');
+        text(g, TB.t((R.MODES[mode] || R.MINIS[mode] || { name: { ja: 'フリー走行', en: 'Free roam' } }).name).slice(0, 8), 16, 46, 12, '#fff');
+      }
+      if (p2p) {
+        text(g, L('残り', 'TO GO'), narrow ? 70 : 84, 22, 10, '#9fb0c2');
+        text(g, (Math.max(0, goalDist - P.total) / SEG * MPS / 1000).toFixed(2) + 'km', narrow ? 62 : 76, 48, 11, '#fff');
+      } else if (laps !== Infinity) {
+        text(g, L('周', 'LAP'), narrow ? 70 : 84, 22, 10, '#9fb0c2');
+        text(g, Math.min(P.lap + 1, laps) + '/' + laps, narrow ? 70 : 84, 50, narrow ? 14 : 16, '#fff');
+      }
+
+      // 左: 順位表
+      if (racing && H > 300) {
+        var list = [{ name: L('あなた', 'YOU'), total: pz(), you: true, color: car.color }].concat(racers().map(function (c) { return { name: c.name, total: c.total, color: c.color, boss: c.boss }; }))
+          .sort(function (a, b) { return b.total - a.total; });
+        var ly = 70;
+        list.slice(0, 8).forEach(function (e, i) {
+          g.fillStyle = e.you ? 'rgba(92,207,160,.28)' : 'rgba(8,12,20,.45)';
+          g.fillRect(8, ly + i * 13 - 9, narrow ? 84 : 96, 12);
+          g.fillStyle = e.color; g.fillRect(10, ly + i * 13 - 7, 3, 8);
+          text(g, (i + 1) + ' ' + e.name, 16, ly + i * 13, 9, e.you ? '#5ccfa0' : e.boss ? '#ffd93d' : '#e8e8f0');
+        });
+      }
+
+      // 中央上: 時間
+      var tw = narrow ? 150 : 200, cx = W / 2;
+      var hud = cfg.hud ? cfg.hud() : null;
+      if (hud) {
+        var hw = Math.min(W - 230, narrow ? 190 : 320), hl = hud.lines.length;
+        panel(g, cx - hw / 2, 8, hw, 22 + hl * 14);
+        text(g, hud.title, cx, 23, 12, '#ffd93d', 'center');
+        hud.lines.forEach(function (ln, i) { text(g, ln.t, cx, 38 + i * 14, 10, ln.c || '#e8e8f0', 'center'); });
+      } else panel(g, cx - tw / 2, 8, tw, 44);
+      if (hud) { /* 表示済み */ } else if (mode === 'arcade' || mode === 'chase' || mode === 'coins') {
+        text(g, L('残り時間', 'TIME'), cx, 20, 9, '#9fb0c2', 'center');
+        text(g, Math.ceil(timer) + '', cx, 46, 24, timer < 10 ? '#ff5252' : '#ffd93d', 'center');
+      } else if (mode === 'gymkhana') {
+        text(g, fmt((raceT + penalty) * 1000), cx, 30, 18, '#fff', 'center');
+        text(g, L('ペナルティ +', 'PENALTY +') + penalty + 's', cx, 45, 10, penalty ? '#ff8a80' : '#9fb0c2', 'center');
+      } else if (mode === 'brake') {
+        text(g, L('赤い枠で止まれ', 'STOP IN THE RED BOX'), cx, 26, 11, '#ff8a80', 'center');
+        text(g, Math.max(0, Math.round(((cfg.stopAt + 0.5) * SEG - pz()) / SEG * MPS)) + ' m', cx, 44, 14, '#fff', 'center');
+      } else if (mode === 'drag') {
+        text(g, fmt(raceT * 1000), cx, 28, 16, '#fff', 'center');
+        text(g, Math.max(0, Math.round((dragLen - P.total) / SEG * MPS)) + ' m', cx, 44, 10, '#9fb0c2', 'center');
+      } else if (mode === 'traffic') {
+        text(g, fmt(raceT * 1000), cx, 28, 16, '#fff', 'center');
+        text(g, combo > 1 ? L('連続 ×', 'COMBO ×') + combo : L('ニアミスで得点', 'near misses score'), cx, 44, 10, combo > 1 ? '#ffd93d' : '#9fb0c2', 'center');
+      } else {
+        text(g, fmt((state === 'race' ? raceT - P.lapStart : 0) * 1000), cx, 30, 18, '#fff', 'center');
+        text(g, L('ベスト ', 'BEST ') + fmt(P.bestLap !== null ? (cfg.bestLap !== undefined && cfg.bestLap !== null ? Math.min(P.bestLap, cfg.bestLap) : P.bestLap) : cfg.bestLap), cx, 45, 10, '#9fb0c2', 'center');
+      }
+      // ボス・逃走車との差
+      var foe = targetCar || (mode === 'duel' || mode === 'race' || mode === 'touge' ? bossCar : null);
+      if (foe && !foe.out) {
+        var gapM = Math.round((foe.total - pz()) / SEG * MPS);
+        panel(g, cx - tw / 2, 56, tw, targetCar ? 30 : 18);
+        text(g, foe.name + '  ' + (gapM >= 0 ? '▲ ' + gapM : '▼ ' + (-gapM)) + 'm', cx, 69, 10, gapM >= 0 ? '#ff8a80' : '#5ccfa0', 'center');
+        if (targetCar) meter(g, cx - tw / 2 + 10, 76, tw - 20, 5, targetCar.hp, '#ff5252', '');
+      }
+
+      // 右上: ミニマップ
+      var ms = narrow ? 84 : 100, mx = W - ms - 8, my = 8;
+      panel(g, mx, my, ms, ms);
+      if (cfg.drawMap) { cfg.drawMap(g, mx, my, ms, clamp(P.total / trackLen, 0, 1)); ms = -1; }
+      if (ms > 0) {
+      g.strokeStyle = 'rgba(255,255,255,.55)'; g.lineWidth = 2;
+      if (!cache.mapPath) {
+        cache.mapPath = new Path2D();
+        T.map.forEach(function (p, i) { var px = mx + 8 + p[0] * (ms - 16), py = my + 8 + p[1] * (ms - 16); if (i === 0) cache.mapPath.moveTo(px, py); else cache.mapPath.lineTo(px, py); });
+        cache.mapPath.closePath();
+      }
+      g.stroke(cache.mapPath); g.lineWidth = 1;
+      function dot(total, color, r) {
+        var i = Math.floor(((total % trackLen) + trackLen) % trackLen / SEG) % T.map.length, p = T.map[i];
+        circle(g, mx + 8 + p[0] * (ms - 16), my + 8 + p[1] * (ms - 16), r, color);
+      }
+      racers().forEach(function (c) { dot(c.total, c.isTarget ? '#ff5252' : c.color, c.boss ? 3.2 : 2.2); });
+      dot(pz(), '#ffffff', 3.8); dot(pz(), car.color, 2.6);
+      }
+      ms = narrow ? 84 : 100;
+
+      // 左下: 速度計
+      var sp = kmh(P.speed), gx = 52, gy = H - 44, rr = 36;
+      if (mode === 'drag') {   // 回転計とシフトランプ
+        g.fillStyle = 'rgba(8,12,20,.7)'; g.beginPath(); g.arc(gx, gy, rr + 6, 0, Math.PI * 2); g.fill();
+        g.lineWidth = 6;
+        g.strokeStyle = 'rgba(255,255,255,.12)'; g.beginPath(); g.arc(gx, gy, rr, Math.PI * 0.75, Math.PI * 2.25); g.stroke();
+        g.strokeStyle = '#2e7d32'; g.beginPath(); g.arc(gx, gy, rr, Math.PI * (0.75 + 1.5 * 0.8), Math.PI * (0.75 + 1.5 * 0.97)); g.stroke();
+        g.lineWidth = 2;
+        var ra = Math.PI * (0.75 + 1.5 * clamp(P.rpm, 0, 1));
+        g.strokeStyle = P.rpm >= 0.8 && P.rpm <= 0.97 ? '#76ff03' : '#fff';
+        g.beginPath(); g.moveTo(gx, gy); g.lineTo(gx + Math.cos(ra) * (rr - 4), gy + Math.sin(ra) * (rr - 4)); g.stroke(); g.lineWidth = 1;
+        text(g, P.gear + L('速', 'th'), gx, gy + 16, 13, '#ffd93d', 'center');
+        text(g, sp + 'km/h', gx, gy + 28, 8, '#9fb0c2', 'center');
+        if (P.rpm >= 0.8 && P.rpm <= 0.97 && P.gear < 5) text(g, L('今だ！ スペース', 'SHIFT NOW!'), cx, H * 0.3, 18, '#76ff03', 'center');
+        return;
+      }
+      g.fillStyle = 'rgba(8,12,20,.7)'; g.beginPath(); g.arc(gx, gy, rr + 6, 0, Math.PI * 2); g.fill();
+      g.lineWidth = 5;
+      g.strokeStyle = 'rgba(255,255,255,.12)'; g.beginPath(); g.arc(gx, gy, rr, Math.PI * 0.75, Math.PI * 2.25); g.stroke();
+      var frac = clamp(sp / 320, 0, 1);
+      g.strokeStyle = P.boosting ? '#5ab4ff' : frac > 0.85 ? '#ff5252' : '#5ccfa0';
+      g.beginPath(); g.arc(gx, gy, rr, Math.PI * 0.75, Math.PI * (0.75 + 1.5 * frac)); g.stroke();
+      g.lineWidth = 1;
+      var na = Math.PI * (0.75 + 1.5 * frac);
+      g.strokeStyle = '#fff'; g.beginPath(); g.moveTo(gx, gy); g.lineTo(gx + Math.cos(na) * (rr - 8), gy + Math.sin(na) * (rr - 8)); g.stroke();
+      text(g, String(sp), gx, gy + 16, 14, '#fff', 'center');
+      text(g, 'km/h', gx, gy + 27, 8, '#9fb0c2', 'center');
+      var gear = P.speed < 1 ? 'N' : String(Math.min(6, 1 + Math.floor(P.speed / (topSpeed * nitroPower) * 6.5)));
+      text(g, gear, gx, gy - 8, 12, '#ffd93d', 'center');
+
+      // 右下: ニトロ・ダメージ
+      panel(g, W - 158, H - 62, 150, 54);
+      meter(g, W - 146, H - 44, 126, 8, P.nitro, P.boosting ? '#8fd3ff' : '#4ea3ff', L('ニトロ', 'NITRO') + (P.draft ? L('  スリップ中', '  DRAFT') : ''));
+      meter(g, W - 146, H - 18, 126, 8, P.damage, P.damage > 0.6 ? '#e06c75' : '#ffb74d', L('ダメージ', 'DAMAGE') + (P.damage >= 1 ? L('  大破', '  WRECKED') : ''));
+
+      // 後ろから迫る車
+      racers().concat(traffic).forEach(function (c) {
+        var gap = pz() - c.total;
+        if (gap > 0 && gap < SEG * 4 && !c.out) {
+          var side = c.offset < P.x ? -1 : 1;
+          g.fillStyle = 'rgba(255,82,82,.8)';
+          var ax = W / 2 + side * 60, ay = H - 8;
+          poly(g, ax - 6, ay, ax + 6, ay, ax + 6, ay, ax, ay - 8, g.fillStyle);
+        }
+      });
+
+      // スタートの信号
+      if (state === 'count') {
+        var lit = clamp(Math.floor((3.2 - countT) / 0.64) + 1, 0, 5);
+        panel(g, cx - 80, H * 0.28, 160, 34);
+        for (var i2 = 0; i2 < 5; i2++) circle(g, cx - 56 + i2 * 28, H * 0.28 + 17, 10, i2 < lit ? '#ff3030' : '#3a1515');
+      }
+      if (msg.t > 0 && state !== 'results') text(g, msg.text, cx, H / 2 - 30, 24, '#ffd93d', 'center');
+      popups.forEach(function (p, i) {
+        g.globalAlpha = clamp(p.t, 0, 1);
+        text(g, p.text, cx, H * 0.36 + i * 18 - (1.6 - p.t) * 10, 14, p.color, 'center');
+      });
+      g.globalAlpha = 1;
+      if ((P.x < -1.05 || P.x > 1.05) && state === 'race' && !findSeg(pz()).tunnel) text(g, L('コースアウト', 'OFF ROAD'), cx, H / 2 + 8, 12, '#ffb74d', 'center');
+      if (sess.paused) {
+        g.fillStyle = 'rgba(0,0,0,.5)'; g.fillRect(0, 0, W, H);
+      }
+    }
+
+    /* =====================================================================
+       TUI の描画
+       ===================================================================== */
+    function textSegment(rows, sg) {
+      var y1 = sg.p1.screen.y, y2 = sg.p2.screen.y;
+      var alt = sg.alt;
+      for (var r = Math.max(0, y2); r < Math.min(H, y1); r++) {
+        var t = (y1 - r) / (y1 - y2);
+        var cx = lerp(sg.p1.screen.x, sg.p2.screen.x, t), w = lerp(sg.p1.screen.w, sg.p2.screen.w, t);
+        var rw = Math.max(0.7, w / 6), lw = Math.max(0.5, w / 22);
+        var row = rows[r];
+        for (var c = 0; c < W; c++) {
+          var d = c + 0.5 - cx, ad = Math.abs(d), cell;
+          if (ad < w) {
+            if (sg.finishLine) cell = [' ', (Math.floor((d + w) / Math.max(1, w / 6)) + sg.index) % 2 ? 'tr-fin-a' : 'tr-fin-b'];
+            else if (sg.stopZone) cell = [' ', 'tr-stop'];
+            else {
+              cell = [' ', alt ? 'tr-road-a' : 'tr-road-b'];
+              if (alt) for (var l = 1; l < LANES; l++) if (Math.abs(d - (-w + 2 * w * l / LANES)) < lw) cell = ['│', 'tr-lane'];
+            }
+          } else if (ad < w + rw) cell = sg.rails && ad > w * 1.08 ? ['║', 'tr-rail'] : [' ', alt ? 'tr-rumble-a' : 'tr-rumble-b'];
+          else if (sg.tunnel) cell = ['▓', 'tr-wall'];
+          else if (sg.waterSide && ((sg.waterSide === 'left' && d < -w * 1.7) || (sg.waterSide === 'right' && d > w * 1.7))) cell = [(c + sg.index) % 5 ? ' ' : '≈', 'tr-water'];
+          else if (spec.neon && sg.index % 4 === 0) cell = ['─', 'tr-neongrid'];
+          else cell = [alt ? '░' : ' ', alt ? 'tr-grass-a' : 'tr-grass-b'];
+          row[c] = cell;
+        }
+      }
+    }
+
+    function textTunnel(rows, sg) {
+      var s1 = sg.p1.screen, s2 = sg.p2.screen;
+      var c1 = Math.round(s1.y - s1.scale * TUNNEL_H * H / 2), c2 = Math.round(s2.y - s2.scale * TUNNEL_H * H / 2);
+      var top = Math.max(0, c1), bot = Math.min(H, Math.round(s1.y));
+      for (var r = top; r < bot; r++) {
+        var ceil = r < c2;
+        for (var c = 0; c < W; c++) {
+          var d = Math.abs(c + 0.5 - s1.x);
+          if (ceil || d > s1.w * 1.2) rows[r][c] = [ceil ? (sg.index % 6 === 0 && d < s1.w * 0.2 ? '▬' : '▒') : '▓', ceil ? (sg.index % 6 === 0 && d < s1.w * 0.2 ? 'tr-tlight' : 'tr-ceil') : 'tr-wall'];
+        }
+      }
+    }
+
+    function textSprite(rows, sp, sx, sy, u, clip) {
+      var X = Math.round(sx), Y = Math.round(sy) - 1, i, j;
+      function P1(dx, dy, ch, cls) { put(rows, X + dx, Y + dy, ch, cls, clip); }
+      switch (sp.kind) {
+        case 'tree': case 'pine': case 'snowpine':
+          var cl = sp.kind === 'snowpine' ? 'tr-snowtree' : 'tr-tree';
+          if (u < 0.7) { P1(0, 0, '▲', cl); break; }
+          P1(0, 0, '█', 'tr-trunk'); P1(0, -1, '▲', cl);
+          if (u > 1.4) { P1(-1, -1, '◢', cl); P1(1, -1, '◣', cl); P1(0, -2, '▲', cl); }
+          break;
+        case 'palm':
+          if (u < 0.7) { P1(0, 0, 'Y', 'tr-tree'); break; }
+          P1(0, 0, '│', 'tr-trunk'); P1(0, -1, '│', 'tr-trunk');
+          P1(-1, -2, '╲', 'tr-tree'); P1(0, -2, '♣', 'tr-tree'); P1(1, -2, '╱', 'tr-tree');
+          break;
+        case 'maple': P1(0, 0, '█', 'tr-trunk'); P1(0, -1, '●', ['tr-maple1', 'tr-maple2'][sp.seed % 2]); if (u > 1.2) { P1(-1, -1, '●', 'tr-maple1'); P1(1, -1, '●', 'tr-maple2'); } break;
+        case 'bush': P1(0, 0, u < 1 ? '♠' : '▟', 'tr-tree'); if (u >= 1) P1(1, 0, '▙', 'tr-tree'); break;
+        case 'cactus': P1(0, 0, '║', 'tr-cactus'); if (u > 0.9) { P1(0, -1, '╫', 'tr-cactus'); P1(-1, -1, '╘', 'tr-cactus'); P1(1, -1, '╛', 'tr-cactus'); } break;
+        case 'mesa':
+          var mw = Math.max(2, Math.round(u * 8)), mh = Math.max(1, Math.round(u * 4));
+          for (j = 0; j < mh; j++) for (i = -mw + j; i <= mw - j; i++) P1(i, -j, j === mh - 1 ? '▄' : '█', 'tr-mesa');
+          break;
+        case 'rock': P1(0, 0, u < 1.2 ? '▄' : '▟', 'tr-rock'); if (u >= 1.2) P1(1, 0, '▙', 'tr-rock'); break;
+        case 'lavarock': P1(0, 0, '▟', 'tr-lava'); P1(1, 0, '▙', 'tr-rock'); break;
+        case 'snowman': P1(0, 0, '●', 'tr-snowman'); if (u > 0.8) P1(0, -1, '•', 'tr-snowman'); break;
+        case 'lamp':
+          var lh = u < 0.8 ? 1 : 3;
+          for (i = 0; i < lh; i++) P1(0, -i, '│', 'tr-pole');
+          P1(0, -lh, night ? '●' : '┐', night ? 'tr-light2' : 'tr-pole');
+          break;
+        case 'building':
+          var bw = Math.max(1, Math.round(u * 5)), bh = Math.max(1, Math.round(u * 7));
+          for (j = 0; j < bh; j++) for (i = 0; i < bw; i++) {
+            var win2 = night && i % 2 === 1 && j % 2 === 1 && ((sp.seed + i + j) % 3);
+            P1(-Math.floor(bw / 2) + i, -j, win2 ? '▪' : '█', win2 ? 'tr-win' : 'tr-bld');
+          }
+          break;
+        case 'lighthouse': for (j = 0; j < Math.max(2, Math.round(u * 5)); j++) P1(0, -j, '█', j % 2 ? 'tr-lh-r' : 'tr-lh-w'); P1(0, -Math.max(2, Math.round(u * 5)), '✦', 'tr-light2'); break;
+        case 'torii': if (u < 1) { P1(0, 0, '⛩', 'tr-torii'); break; } P1(-1, 0, '│', 'tr-torii'); P1(1, 0, '│', 'tr-torii'); P1(-2, -1, '▀', 'tr-torii'); P1(-1, -1, '▀', 'tr-torii'); P1(0, -1, '▀', 'tr-torii'); P1(1, -1, '▀', 'tr-torii'); P1(2, -1, '▀', 'tr-torii'); break;
+        case 'container': var cw2 = Math.max(1, Math.round(u * 5)); for (j = 0; j < 1 + sp.seed % 2; j++) for (i = 0; i < cw2; i++) P1(i - (cw2 >> 1), -j, '▆', 'tr-cont' + ((sp.seed + j) % 3)); break;
+        case 'crane': for (j = 0; j < Math.max(2, Math.round(u * 10)); j++) P1(0, -j, '║', 'tr-crane'); for (i = -2; i < 4; i++) P1(i, -Math.max(2, Math.round(u * 10)), '═', 'tr-crane'); break;
+        case 'barrier': for (i = -1; i <= 1; i++) P1(i, 0, '╤', 'tr-pole'); break;
+        case 'billboard': if (u < 1) { P1(0, -1, '▬', 'tr-sign'); break; } puts(rows, X - 3, Y - 2, night ? ' $race ' : 'TUI-BASE', 'tr-sign'); P1(-2, -1, '│', 'tr-pole'); P1(2, -1, '│', 'tr-pole'); break;
+        case 'grandstand': var gw = Math.max(2, Math.round(u * 12)); for (j = 0; j < Math.max(1, Math.round(u * 3)); j++) for (i = -gw / 2; i < gw / 2; i++) P1(Math.round(i), -j, (i + j) % 3 ? '▒' : '•', 'tr-stand'); break;
+        case 'tyrewall': P1(-1, 0, '◎', 'tr-tyrew'); P1(0, 0, '◎', 'tr-tyrew'); P1(1, 0, '◎', 'tr-tyrew'); break;
+        case 'neon': for (j = 0; j < Math.max(2, Math.round(u * 6)); j++) P1(0, -j, '┃', sp.seed % 2 ? 'tr-neon-c' : 'tr-neon-m'); break;
+        case 'holo': puts(rows, X - 2, Y - Math.max(2, Math.round(u * 3)), '[TUI]', 'tr-holo'); break;
+        case 'acttower': for (j = 0; j < Math.max(3, Math.round(u * 26)); j++) { P1(0, -j, '█', 'tr-tower'); P1(1, -j, j % 2 ? '▌' : '█', 'tr-tower'); } break;
+        case 'twintower': for (j = 0; j < Math.max(3, Math.round(u * 22)); j++) { P1(-1, -j, '█', 'tr-tower'); if (j < Math.round(u * 19)) P1(1, -j, '█', 'tr-tower'); } break;
+        case 'tvtower': var th = Math.max(3, Math.round(u * 16)); for (j = 0; j < th; j++) P1(0, -j, j === Math.round(th * 0.75) ? '▬' : '┼', 'tr-tv'); P1(0, -th, '╽', 'tr-tv'); break;
+        case 'castle': var ch2 = Math.max(2, Math.round(u * 7)); for (j = 0; j < ch2; j++) for (i = -2 + (j >> 1); i <= 2 - (j >> 1); i++) P1(i, -j, j % 2 ? '▀' : '█', j % 2 ? 'tr-roof' : 'tr-wallw'); P1(0, -ch2, '♔', 'tr-gold'); break;
+        case 'ferris': P1(0, -Math.max(1, Math.round(u * 5)), '◎', 'tr-ferris'); P1(-1, 0, '╱', 'tr-pole'); P1(1, 0, '╲', 'tr-pole'); break;
+        case 'tea': P1(-1, 0, '◠', 'tr-tree'); P1(0, 0, '◠', 'tr-tree'); P1(1, 0, '◠', 'tr-tree'); break;
+        case 'dune': for (i = -3; i <= 3; i++) P1(i, 0, '▁', 'tr-dune'); break;
+        case 'kite': P1(0, -Math.max(2, Math.round(u * 6)), '◆', 'tr-kite'); break;
+        case 'unagi': puts(rows, X - 2, Y - 1, 'うなぎ', 'tr-unagi'); break;
+        case 'piano': puts(rows, X - 2, Y - 1, '▌▐▌▐▌', 'tr-piano'); break;
+        case 'soundwall': for (i = -3; i <= 3; i++) P1(i, 0, '▆', 'tr-swall'); break;
+        case 'greensign': P1(0, -1, '▬', 'tr-green'); P1(0, 0, '│', 'tr-pole'); break;
+        case 'tollgate': for (i = -4; i <= 4; i += 2) P1(i, 0, '║', 'tr-pole'); for (i = -4; i <= 4; i++) P1(i, -1, '▀', 'tr-sign'); break;
+        case 'banner': case 'fork':
+          var bw3 = Math.round(u / 0.12 * 1.15), bt3 = Y - Math.max(2, Math.round(u / 0.12 * 0.9));
+          for (i = -bw3; i <= bw3; i++) put(rows, X + i, bt3, ' ', sp.kind === 'fork' ? 'tr-green' : 'tr-banner', clip);
+          var txt = sp.kind === 'fork' ? sp.texts.join(' ') : sp.text;
+          if (bw3 * 2 > strw(txt)) puts(rows, X - Math.floor(strw(txt) / 2), bt3, txt, sp.kind === 'fork' ? 'tr-green' : 'tr-banner');
+          for (j = bt3 + 1; j <= Y; j++) { put(rows, X - bw3, j, '│', 'tr-pole', clip); put(rows, X + bw3, j, '│', 'tr-pole', clip); }
+          break;
+        case 'sign':
+          if (u < 0.9) { P1(0, 0, '▣', 'tr-sign'); break; }
+          puts(rows, X - 2, Y - 1, '[TUI]', 'tr-sign'); P1(-1, 0, '│', 'tr-pole'); P1(1, 0, '│', 'tr-pole');
+          break;
+        case 'chevron':
+          var ch = sp.dir > 0 ? '»' : '«';
+          P1(0, u > 1 ? -1 : 0, ch, 'tr-chev');
+          if (u > 1) { P1(-1, -1, ch, 'tr-chev'); P1(1, -1, ch, 'tr-chev'); P1(0, 0, '│', 'tr-pole'); }
+          break;
+        case 'gantry': case 'cpgate': case 'arch':
+          var half = Math.round(u / 0.12 * 1.15), top = Y - Math.max(2, Math.round(u / 0.12 * 0.8));
+          var gcl = sp.kind === 'cpgate' ? 'tr-cp' : sp.kind === 'arch' ? 'tr-neon-c' : 'tr-fin-b';
+          for (i = -half; i <= half; i++) put(rows, X + i, top, sp.kind === 'gantry' ? ((i + half) % 2 ? '▀' : '▄') : '▀', gcl, clip);
+          if (sp.kind === 'cpgate' && half > 6) puts(rows, X - 5, top, ' CHECK ', 'tr-cp');
+          for (j = top + 1; j <= Y; j++) { put(rows, X - half, j, '│', 'tr-pole', clip); put(rows, X + half, j, '│', 'tr-pole', clip); }
+          break;
+      }
+    }
+
+    function textObj(rows, o, x, y, u, clip) {
+      if (o.hit && o.kind !== 'oil' && o.kind !== 'pad') return;
+      var ch = { cone: '▲', debris: '▪', oil: '●', pad: '»', coin: '◉' }[o.kind];
+      put(rows, x, Math.round(y) - 1, ch, 'tr-o-' + o.kind, clip);
+      if (u > 1.2 && o.kind === 'oil') { put(rows, x - 1, Math.round(y) - 1, '●', 'tr-o-oil', clip); put(rows, x + 1, Math.round(y) - 1, '●', 'tr-o-oil', clip); }
+      if (u > 1.2 && o.kind === 'pad') put(rows, x + 1, Math.round(y) - 1, '»', 'tr-o-pad', clip);
+    }
+
+    function textCar(rows, cx, cy, cw, o, clip) {
+      var cls = o.ghost ? 'tr-ghost' : ccls(o.color);
+      var B = BODIES[o.body] || BODIES.sedan;
+      var n = Math.max(1, Math.round(cw * (o.wm || 1))), X0 = Math.round(cx - n / 2), Y = Math.round(cy) - 1, i;
+      if (n <= 1) { put(rows, X0, Y, '▄', cls, clip); return; }
+      if (n <= 3) { for (i = 0; i < n; i++) put(rows, X0 + i, Y, B.box ? '█' : '▆', cls, clip); if (B.box) for (i = 0; i < n; i++) put(rows, X0 + i, Y - 1, '▄', cls, clip); return; }
+      if (B.box) {
+        for (i = 0; i < n; i++) { put(rows, X0 + i, Y - 1, '█', cls, clip); put(rows, X0 + i, Y - 2, '▄', cls, clip); }
+      } else if (B.open) {
+        put(rows, X0 + Math.floor(n / 2), Y - 1, '▲', cls, clip);
+        for (i = 0; i < n; i++) put(rows, X0 + i, Y - 2, '▁', cls, clip);
+      } else {
+        for (i = 1; i < n - 1; i++) put(rows, X0 + i, Y - 1, '▄', i > 1 && i < n - 2 ? 'tr-glass' : cls, clip);
+      }
+      for (i = 0; i < n; i++) put(rows, X0 + i, Y, i === 0 || i === n - 1 ? '▐' : '█', i === 0 || i === n - 1 ? 'tr-light' : cls, clip);
+      if (B.bar) put(rows, X0 + Math.floor(n / 2), Y - 2, Math.floor(t0 * 6) % 2 ? '◆' : '◇', 'tr-siren', clip);
+      var label = o.ghost ? 'GHOST' : o.name;
+      if (label && !o.traffic && n >= 6 && Y - 2 < clip) puts(rows, Math.round(cx - label.length / 2), Y - (B.box ? 3 : 2), label, o.boss ? 'tr-label-b' : 'tr-label');
+    }
+
+    function renderText(view, status) {
+      useGeom();
+      W = sess.W; H = sess.H;
+      var rows = [], x, yy, i;
+      var horizon = Math.floor(H / 2);
+      for (yy = 0; yy < H; yy++) {
+        var line = [];
+        for (x = 0; x < W; x++) line.push([' ', yy < horizon / 2 ? 'tr-sky' : 'tr-sky2']);
+        rows.push(line);
+      }
+      var orb = pal.sun || pal.moon;
+      if (orb && weather !== 'fog' && weather !== 'rain') puts(rows, Math.round(((orb.x * W - skyOff * 200) % W + W) % W), Math.max(0, Math.round(orb.y * H * 0.8)), pal.sun ? '☀' : '☾', 'tr-orb');
+      if (night) {
+        for (i = 0; i < W * 0.12; i++) {
+          var sx = ((i * 37 + Math.floor(skyOff * 300)) % W + W) % W, sy = (i * 7) % Math.max(1, horizon - 2);
+          rows[sy][sx] = ['·', sy < horizon / 2 ? 'tr-star' : 'tr-star2'];
+        }
+      } else if (weather === 'clear') {
+        for (i = 0; i < 3; i++) puts(rows, ((i * 29 + Math.floor(skyOff * 220)) % (W + 12) + W + 12) % (W + 12) - 6, 1 + i % 2, '~~~~', 'tr-cloud');
+      }
+      for (x = 0; x < W; x++) {
+        var hh;
+        if (spec.skyline) hh = Math.round((2 + ((Math.floor((x + hillOff * 350) / 4) * 37) % 5 + 5) % 5) * H / 40);
+        else { var tt = (x + hillOff * 350) * 0.11; hh = Math.round((Math.sin(tt) * 0.5 + Math.sin(tt * 2.3 + 1.7) * 0.3 + 0.8) * H * 0.1); }
+        for (var k = 0; k < hh; k++) {
+          var hy = horizon - 1 - k;
+          if (hy >= 0) rows[hy][x] = [spec.skyline ? (night && (x + k) % 3 === 0 && k < hh - 1 ? '▪' : '█') : (k === hh - 1 ? '▄' : '█'), spec.skyline && night && (x + k) % 3 === 0 && k < hh - 1 ? 'tr-win2' : 'tr-hill'];
+        }
+      }
+
+      var base = findSeg(P.pos), basePct = (P.pos % SEG) / SEG;
+      var pSeg = findSeg(pz()), pPct = (((pz() % trackLen) + trackLen) % trackLen % SEG) / SEG;
+      var pY = lerp(pSeg.p1.world.y, pSeg.p2.world.y, pPct);
+      var maxy = H, ox = 0, dx = -(base.curve * basePct), n, sg;
+      for (n = 0; n < DRAW; n++) {
+        sg = segs[(base.index + n) % segs.length];
+        var looped = sg.index < base.index;
+        sg.clip = maxy;
+        project(sg.p1, (P.x * ROAD_W) - ox, pY + CAM_H, P.pos - (looped ? trackLen : 0));
+        project(sg.p2, (P.x * ROAD_W) - ox - dx, pY + CAM_H, P.pos - (looped ? trackLen : 0));
+        ox += dx; dx += sg.curve;
+        if (sg.p1.camera.z <= DEPTH || sg.p2.screen.y >= sg.p1.screen.y || sg.p2.screen.y >= maxy) continue;
+        textSegment(rows, sg);
+        maxy = sg.p2.screen.y;
+      }
+
+      var bySeg = {};
+      function addTo(obj, total, kind) {
+        var z = ((total % trackLen) + trackLen) % trackLen, idx = Math.floor(z / SEG);
+        (bySeg[idx] = bySeg[idx] || []).push({ o: obj, pct: (z % SEG) / SEG, kind: kind });
+      }
+      cars.forEach(function (c) { if (c.total - pz() > -SEG * 0.3 && !(c.out && c.speed < 1)) addTo(c, c.total, 'car'); });
+      traffic.forEach(function (c) { if (c.total - pz() > -SEG * 0.3) addTo(c, c.total, 'car'); });
+      var gp = ghostPos();
+      if (gp && gp.total - pz() > SEG * 0.4) addTo({ ghost: true, offset: gp.offset, body: car.body }, gp.total, 'car');
+      dyn.forEach(function (o) { addTo(o, o.z, 'dyn'); });
+      for (n = DRAW - 1; n > 0; n--) {
+        sg = segs[(base.index + n) % segs.length];
+        if (!sg.p1.screen.scale || sg.p1.camera.z <= DEPTH) continue;
+        var scale = sg.p1.screen.scale;
+        if (sg.tunnel) textTunnel(rows, sg);
+        sg.objs.forEach(function (o) { textObj(rows, o, Math.round(sg.p1.screen.x + (scale * o.offset * ROAD_W * W / 2)), sg.p1.screen.y, sg.p1.screen.w * 0.12, sg.clip); });
+        sg.sprites.forEach(function (sp) {
+          textSprite(rows, sp, sg.p1.screen.x + (scale * sp.offset * ROAD_W * W / 2), sg.p1.screen.y, sg.p1.screen.w * 0.12, sg.clip);
+        });
+        (bySeg[sg.index] || []).forEach(function (e) {
+          var sc2 = lerp(sg.p1.screen.scale, sg.p2.screen.scale, e.pct);
+          var ccx = lerp(sg.p1.screen.x, sg.p2.screen.x, e.pct) + (sc2 * e.o.offset * ROAD_W * W / 2);
+          var ccy = lerp(sg.p1.screen.y, sg.p2.screen.y, e.pct);
+          if (e.kind === 'dyn') { textObj(rows, e.o, Math.round(ccx), ccy, 1, sg.clip); return; }
+          textCar(rows, ccx, ccy, sc2 * CAR_W * 2 * ROAD_W * W / 2, e.o, sg.clip);
+        });
+      }
+
+      // 天気
+      var wch = { rain: '╱', snow: '*', sand: '·', ash: '˙' }[weather];
+      if (wch) {
+        var cnt = Math.round(W * H * (weather === 'rain' ? 0.035 : 0.025));
+        for (i = 0; i < cnt; i++) {
+          var wx = Math.floor(((i * 73.3 + t0 * (weather === 'sand' ? -40 : 6)) % W + W) % W);
+          var wy = Math.floor(((i * 41.7 + t0 * (weather === 'rain' ? 30 : weather === 'sand' ? 1 : 6)) % H + H) % H);
+          if (rows[wy] && rows[wy][wx]) rows[wy][wx] = [wch, rows[wy][wx][1]];
+        }
+      }
+
+      // 自車
+      var myW = Math.max(7, Math.round((DEPTH / PLAYER_Z) * CAR_W * 2 * ROAD_W * W / 2));
+      var shake = ((P.x < -1 || P.x > 1) && P.speed > MAX / 5) || P.spin > 0 ? (Math.random() < 0.5 ? -1 : 1) : 0;
+      var X0 = Math.round(W / 2 - myW / 2) + shake;
+      var me = ccls(car.color);
+      for (i = 2; i < myW - 2; i++) put(rows, X0 + i, H - 3, '▄', i > 2 && i < myW - 3 ? 'tr-glass' : me);
+      for (i = 0; i < myW; i++) {
+        var edge = i < 2 || i >= myW - 2;
+        put(rows, X0 + i, H - 2, '█', edge ? (keys.down ? 'tr-light' : 'tr-light-d') : me);
+      }
+      if (car.siren) put(rows, X0 + Math.floor(myW / 2), H - 4, Math.floor(t0 * 6) % 2 ? '◆' : '◇', 'tr-siren');
+      put(rows, X0 + 1, H - 1, '▀', 'tr-tyre'); put(rows, X0 + 2, H - 1, '▀', 'tr-tyre');
+      put(rows, X0 + myW - 3, H - 1, '▀', 'tr-tyre'); put(rows, X0 + myW - 2, H - 1, '▀', 'tr-tyre');
+      if (P.boosting) { put(rows, X0 + 3, H - 1, '≈', 'tr-boost'); put(rows, X0 + myW - 4, H - 1, '≈', 'tr-boost'); }
+
+      var mid = Math.max(1, Math.floor(H / 2) - 3);
+      if (state === 'count') {
+        var lit = clamp(Math.floor((3.2 - countT) / 0.64) + 1, 0, 5);
+        var lights = '';
+        for (i = 0; i < 5; i++) lights += i < lit ? '● ' : '○ ';
+        center(rows, mid, ' ' + lights, 'tr-lights');
+      } else if (msg.t > 0 && state !== 'results') center(rows, mid, ' ' + msg.text + ' ', 'tr-msg');
+      popups.forEach(function (p, pi) { center(rows, mid + 2 + pi, ' ' + p.text + ' ', 'tr-pop'); });
+      if ((P.x < -1.05 || P.x > 1.05) && state === 'race' && !pSeg.tunnel) center(rows, H - 5, L(' コースアウト ', ' OFF ROAD '), 'tr-warn');
+      if (sess.paused) center(rows, mid, L(' 一時停止 — p でつづける ', ' PAUSED — p to resume '), 'tr-msg');
+      if (state === 'results' && result) textResults(rows);
+
+      paintGrid(view, rows);
+      if (status) statusLine(status);
+    }
+
+    // 1 行を 1 つの文字列＋span にまとめて描く（同じクラスが続くところはまとめる）
+    function paintGrid(el, rows) {
+      var html = '';
+      rows.forEach(function (cells) {
+        html += '<div class="g-row">';
+        var cls = null, txt = '';
+        cells.forEach(function (c) {
+          if (c[1] === cls) { txt += c[0]; return; }
+          if (cls !== null) html += '<span class="' + cls + '">' + esc(txt) + '</span>';
+          cls = c[1]; txt = c[0];
+        });
+        if (cls !== null) html += '<span class="' + cls + '">' + esc(txt) + '</span>';
+        html += '</div>';
+      });
+      el.innerHTML = html;
+    }
+    function esc(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
+    function statusLine(status) {
+      var K = TB.Kit, parts2 = [];
+      var hud = cfg.hud ? cfg.hud() : null;
+      if (hud) { parts2.push([hud.title + '  ', 'warn bold']); hud.lines.forEach(function (ln) { parts2.push([ln.t + '  ', 'accent']); }); }
+      if (mode === 'drag') parts2.push([P.gear + L('速 ', 'th '), 'warn bold'], [K.bar(clamp(P.rpm, 0, 1), 1, 10) + ' ', P.rpm >= 0.8 && P.rpm <= 0.97 ? 'accent bold' : 'dim'], [P.rpm >= 0.8 && P.rpm <= 0.97 && P.gear < 5 ? L('今だ！ ', 'SHIFT! ') : '', 'accent bold']);
+      if (mode === 'brake') parts2.push([L('枠まで ', 'box in ') + Math.max(0, Math.round(((cfg.stopAt + 0.5) * SEG - pz()) / SEG * MPS)) + 'm  ', 'err bold']);
+      if (mode === 'coins') parts2.push([L('コイン ', 'COINS ') + coinsGot + '  ', 'warn bold']);
+      var place = P.finished && P.place ? P.place : rank();
+      if (mode === 'gymkhana') parts2.push([L('ペナルティ +', 'PENALTY +') + penalty + 's  ', penalty ? 'err bold' : 'dim']);
+      if (p2p) parts2.push([L('残り ', 'TO GO '), 'dim'], [(Math.max(0, goalDist - P.total) / SEG * MPS / 1000).toFixed(2) + 'km  ', '']);
+      if (mode === 'race' || mode === 'duel' || mode === 'elim' || mode === 'touge') parts2.push([L('順位 ', 'POS '), 'dim'], [place + '/' + (racers().length + 1) + '  ', place === 1 ? 'warn bold' : 'accent bold']);
+      if (laps !== Infinity && !p2p) parts2.push([L('周 ', 'LAP '), 'dim'], [Math.min(P.lap + 1, laps) + '/' + laps + '  ', '']);
+      if (mode === 'arcade' || mode === 'chase' || mode === 'coins') parts2.push([L('残り ', 'TIME '), 'dim'], [Math.ceil(timer) + 's  ', timer < 10 ? 'err bold' : 'warn bold']);
+      if (mode === 'traffic') parts2.push([L('点 ', 'SCORE '), 'dim'], [Math.round(score) + (combo > 1 ? ' ×' + combo : '') + '  ', 'warn bold']);
+      if (mode !== 'traffic' && mode !== 'chase' && mode !== 'world' && mode !== 'coins') parts2.push([fmt((state === 'race' ? raceT - P.lapStart : 0) * 1000) + '  ', '']);
+      if (targetCar) parts2.push([targetCar.name + ' ', 'err'], [Math.round((targetCar.total - pz()) / SEG * MPS) + 'm ' + K.bar(targetCar.hp, 1, 5) + '  ', 'err']);
+      else if (bossCar && !bossCar.out) { var gm = Math.round((bossCar.total - pz()) / SEG * MPS); parts2.push([bossCar.name + ' ', 'warn'], [(gm >= 0 ? '▲' + gm : '▼' + (-gm)) + 'm  ', gm >= 0 ? 'err' : 'accent']); }
+      parts2.push([kmh(P.speed) + 'km/h  ', 'accent bold'], ['N₂O ', 'dim'], [K.bar(P.nitro, 1, 6) + '  ', P.boosting ? 'accent-2 bold' : 'accent-2'],
+                  [L('傷 ', 'DMG '), 'dim'], [K.bar(Math.min(1, P.damage), 1, 4), P.damage > 0.6 ? 'err' : 'warn'], [P.draft ? L('  スリップ中', '  DRAFT') : '', 'accent-2']);
+      K.renderParts(status, parts2);
+    }
+
+    function textResults(rows) {
+      var r = result, top = 1, i;
+      var lines = sess.resultLines ? sess.resultLines(r) : [];
+      var bw = Math.min(W - 2, 46), bx = Math.floor((W - bw) / 2);
+      var list = (mode === 'race' || mode === 'duel' || mode === 'elim' || mode === 'touge') ? r.list.slice(0, Math.max(0, H - 6 - lines.length)) : [];
+      var hgt = Math.min(H - 1, top + list.length + lines.length + 4);
+      for (var yy = top; yy < hgt; yy++) for (i = 0; i < bw; i++) rows[yy][bx + i] = [' ', 'tr-panel'];
+      center(rows, top, sess.resultTitle ? sess.resultTitle(r) : '', 'tr-panel-h');
+      list.forEach(function (e, k) {
+        var name = e.you ? L('あなた', 'YOU') : e.name;
+        puts(rows, bx + 2, top + 2 + k, (k + 1) + '. ' + name, e.you ? 'tr-panel-me' : 'tr-panel');
+        puts(rows, bx + 20, top + 2 + k, e.out ? L('脱落', 'OUT') : e.time !== null ? fmt(e.time * 1000) : L('走行中', 'running'), 'tr-panel');
+      });
+      lines.forEach(function (l, k) { center(rows, top + 2 + list.length + k + (list.length ? 1 : 0), l, 'tr-panel-h'); });
+    }
+
+    /* --- 外に見せるもの --- */
+    sess.W = W; sess.H = H;
+    sess.update = function (dt) { eng.mute(!!sess.paused); if (!sess.paused) update(dt); };
+    sess.audio = function () { return eng.info(); };
+    sess.render = render;
+    sess.renderText = renderText;
+    sess.keys = keys;
+    sess.state = function () { return state; };
+    sess.result = function () { return result; };
+    sess.stop = function () { eng.stop(); };
+    sess.track = T;
+    sess.cfg = cfg;
+    sess.key = function (k, down) {
+      var m = { ArrowLeft: 'left', a: 'left', A: 'left', ArrowRight: 'right', d: 'right', D: 'right',
+                ArrowUp: 'up', w: 'up', W: 'up', ArrowDown: 'down', s: 'down', S: 'down',
+                ' ': 'nitro', Shift: 'nitro', n: 'nitro', N: 'nitro', x: 'nitro', X: 'nitro' }[k];
+      if (m) keys[m] = down;
+      if ((k === 'r' || k === 'R') && down && mode === 'world' && !edgeDone && P.speed < MAX * 0.15 && cfg.onEdgeEnd) {
+        edgeDone = true;
+        cfg.onEdgeEnd({ speed: 0, x: -P.x, nitro: P.nitro, damage: P.damage, reverse: true, frac: P.total / trackLen });
+        return true;
+      }
+      return !!m;
+    };
+    sess.releaseKeys = function () { for (var k in keys) keys[k] = false; };
+    // テスト・見本用に中の値を少しだけ読めるように
+    sess.info = function () { return { state: state, lap: P.lap, place: P.finished && P.place ? P.place : rank(), speed: P.speed, x: P.x, damage: P.damage, raceT: raceT, timer: timer, score: score, r0: cars[0] ? { t: Math.round((cars[0].total - pz()) / SEG), v: +(cars[0].speed / MAX).toFixed(2), o: +cars[0].offset.toFixed(2), m: +(cars[0].max / MAX).toFixed(2) } : null, tgap: targetCar ? Math.round((targetCar.total - pz()) / SEG) : null, thp: targetCar ? targetCar.hp : null, tspd: targetCar ? targetCar.speed / MAX : null, pspd: P.speed / MAX }; };
+    return sess;
+  };
+
+  /* =====================================================================
+     メニュー用の小さな絵
+     ===================================================================== */
+
+  /** コースの 1 コマを canvas に描く（選択画面の見本） */
+  R.drawPreview = function (cv, track, weather, mirror) {
+    var s = R.Session({ track: track, weather: weather || R.TRACKS[track].weather, mirror: mirror, demo: true, laps: Infinity, field: [] });
+    s.W = cv.width; s.H = cv.height;
+    var g = cv.getContext('2d');
+    s.update(0.016);
+    s.render(g);
+    s.stop();
+  };
+
+  /** 車の見本（ガレージ） */
+  R.drawCarCard = function (cv, body, color) {
+    var g = cv.getContext('2d');
+    var w = cv.width, h = cv.height;
+    var gr = g.createLinearGradient(0, 0, 0, h);
+    gr.addColorStop(0, '#1b2433'); gr.addColorStop(1, '#0b0f18');
+    g.fillStyle = gr; g.fillRect(0, 0, w, h);
+    g.fillStyle = '#2a3346'; g.fillRect(0, h * 0.78, w, h * 0.22);
+    g.strokeStyle = 'rgba(255,255,255,.08)';
+    for (var i = 0; i < 8; i++) { g.beginPath(); g.moveTo(w / 2, h * 0.78); g.lineTo(i * w / 7, h); g.stroke(); }
+    var cw = Math.min(w * 0.6, h * 1.05) / ((BODIES[body] && BODIES[body].wm) || 1);
+    drawCar(g, w / 2, h * 0.88, cw, color, body, { t: performance.now() / 1000, siren: body === 'police' });
+  };
+
+  /* =====================================================================
+     文字版の器（ターミナルの中の Kit の枠で 1 レース走る）
+     done(result|null, reason)
+     ===================================================================== */
+
+  R.runText = function (cfg, done, opts) {
+    opts = opts || {};
+    var dims = textDims();
+    var finished = false, stopped = false, raf = 0, last = null, tick2 = false, sum = null;
+    var sess;
+    function prep(c) {
+      c.tui = true;
+      c.onFinish = function (r) { finished = true; sum = opts.onResult ? opts.onResult(r) : null; };
+      if (opts.chain) c.onEdgeEnd = function (carry) {
+        var nx = opts.chain(carry);
+        if (!nx) return;
+        setTimeout(function () {
+          if (stopped) return;
+          sess.stop();
+          sess = make(nx);
+          applyPal(sess.track.pal);
+        }, 0);
+      };
+      return c;
+    }
+    function make(c) {
+      var ss = R.Session(prep(c));
+      ss.W = dims.w; ss.H = dims.h;
+      ss.resultTitle = function () { return sum ? sum.title : ''; };
+      ss.resultLines = function () { return sum ? sum.lines : []; };
+      return ss;
+    }
+    sess = make(cfg);
+    var pal = sess.track.pal;
+    var kit = TB.Kit.open({
+      title: opts.title || 'TUI RACING',
+      subtitle: opts.subtitle,
+      hint: L('←→ ハンドル  ↑ アクセル  ↓ ブレーキ  スペース ニトロ  p 一時停止  m GUI へ  q やめる',
+              '←→ steer  ↑ gas  ↓ brake  space nitro  p pause  m to GUI  q quit'),
+      onKey: function (k) {
+        if (k === 'm' || k === 'M') { if (opts.onSwitch) { stop(); kit.end([]); opts.onSwitch(); } return; }
+        if (k === 'p' || k === 'P') { if (!finished) { sess.paused = !sess.paused; last = null; } return; }
+        if (k === 'Enter' && finished) { close(sess.result(), 'finish'); return; }
+        if ((k === 'r' || k === 'R') && sess.key(k, true)) return;
+        sess.key(k, true);
+      },
+      onKeyUp: function (k) { sess.key(k, false); },
+      onQuit: function () {
+        var r = finished ? sess.result() : null;
+        stop();
+        setTimeout(function () { done(r, r ? 'finish' : 'quit', sum); }, 0);
+        return [];
+      }
+    });
+    var view = document.createElement('div');
+    view.className = 'g-map tr-view';
+    function applyPal(pl) {
+      [['--tr-sky', pl.sky[0]], ['--tr-sky2', pl.sky[2]], ['--tr-hill', pl.hill], ['--tr-wall', pl.wall || '#333'], ['--tr-water', pl.water || '#2f7fc1'],
+       ['--tr-grass-a', pl.grass[0]], ['--tr-grass-b', pl.grass[1]],
+       ['--tr-road-a', pl.road[0]], ['--tr-road-b', pl.road[1]],
+       ['--tr-rumble-a', pl.rumble[0]], ['--tr-rumble-b', pl.rumble[1]], ['--tr-lane', pl.lane]].forEach(function (v) {
+        view.style.setProperty(v[0], v[1]);
+      });
+    }
+    applyPal(pal);
+    kit.body.appendChild(view);
+    kit.body.appendChild(R.makePad(function () { return sess; }));
+    view.addEventListener('pointerdown', function () { if (finished) close(sess.result(), 'finish'); });
+    if (TB.Win) TB.Win.setTuiApp({ toGui: function () { if (opts.onSwitch) { stop(); kit.end([]); opts.onSwitch(); } } });
+
+    function stop() {
+      if (stopped) return;
+      stopped = true;
+      cancelAnimationFrame(raf);
+      sess.stop();
+      if (TB.Win) TB.Win.setTuiApp(null);
+    }
+    function close(r, why) {
+      stop();
+      kit.end([]);
+      done(r, why, sum);
+    }
+    function frame(now) {
+      if (stopped) return;
+      if (last === null) last = now;
+      var dt = Math.min(0.05, (now - last) / 1000);
+      last = now;
+      for (var st = 0; st < (R.speedup || 1); st++) sess.update(dt);
+      tick2 = !tick2;
+      if (tick2) sess.renderText(view, kit.status);
+      raf = requestAnimationFrame(frame);
+    }
+    sess.renderText(view, kit.status);
+    raf = requestAnimationFrame(frame);
+    return { stop: function () { stop(); kit.end([]); }, session: sess };
+  };
+
+  /** スマホ用の押しっぱなしボタン */
+  R.makePad = function (sess) {
+    var pad = document.createElement('div');
+    pad.className = 'race-pad';
+    [['◀', 'ArrowLeft', 'left'], ['▶', 'ArrowRight', 'right'], ['N₂O', ' ', 'nitro'], ['BRK', 'ArrowDown', 'down'], ['GAS', 'ArrowUp', 'up']].forEach(function (p) {
+      var b = document.createElement('button');
+      b.type = 'button'; b.textContent = p[0]; b.className = 'rbtn ' + p[2];
+      function on(e) { e.preventDefault(); (typeof sess === 'function' ? sess() : sess).key(p[1], true); }
+      function off(e) { e.preventDefault(); var s = typeof sess === 'function' ? sess() : sess; if (s) s.key(p[1], false); }
+      b.addEventListener('pointerdown', on);
+      b.addEventListener('pointerup', off);
+      b.addEventListener('pointerleave', off);
+      b.addEventListener('pointercancel', off);
+      pad.appendChild(b);
+    });
+    return pad;
+  };
+})();
