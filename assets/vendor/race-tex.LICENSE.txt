@@ -1,0 +1,4 @@
+race-tex.js に埋め込んだ写真テクスチャは Poly Haven (https://polyhaven.com) の CC0（パブリックドメイン）素材を縮小したものです。
+  - asphalt_02, aerial_grass_rock, concrete_floor_02, forest_ground_04 (Textures)
+  - kloofendal_48d_partly_cloudy_puresky (HDRI, tonemapped JPG)
+License: CC0 1.0 Universal — https://creativecommons.org/publicdomain/zero/1.0/

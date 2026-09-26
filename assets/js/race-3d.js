@@ -18,13 +18,32 @@
   var Y_SCALE = 0.35;       // 起伏は現実的な勾配に縮める
 
   /** three.js を必要なときだけ読み込む */
-  R.load3D = function (cb) {
-    if (window.THREE) { cb(true); return; }
+  function loadScript(src, cb) {
     var sc = document.createElement('script');
-    sc.src = 'assets/vendor/three.min.js';
-    sc.onload = function () { cb(!!window.THREE); };
-    sc.onerror = function () { cb(false); };
+    sc.src = src; sc.onload = function () { cb(true); }; sc.onerror = function () { cb(false); };
     document.head.appendChild(sc);
+  }
+  R.load3D = function (cb) {
+    if (window.THREE && TB.RaceTex) { cb(true); return; }
+    loadScript('assets/vendor/three.min.js', function (ok) {
+      if (!ok || !window.THREE) { cb(false); return; }
+      // 写真テクスチャ（Poly Haven, CC0）。読めなくても 3D は動く
+      loadScript('assets/vendor/race-tex.js', function () { cb(true); });
+    });
+  };
+  /** 写真テクスチャ（data URL なので file:// でも使える） */
+  var texStore = {};
+  R.tex3D = function (name, rep) {
+    if (!window.THREE || !TB.RaceTex || !TB.RaceTex[name]) return null;
+    var key = name + (rep || '');
+    if (texStore[key]) return texStore[key];
+    var img = new Image(), t = new THREE.Texture(img);
+    img.onload = function () { t.needsUpdate = true; };
+    img.src = TB.RaceTex[name];
+    t.wrapS = t.wrapT = THREE.RepeatWrapping; t.encoding = THREE.sRGBEncoding; t.anisotropy = 8;
+    if (name === 'sky') { t.wrapS = THREE.RepeatWrapping; t.wrapT = THREE.ClampToEdgeWrapping; }
+    texStore[key] = t;
+    return t;
   };
   R.can3D = function () {
     try { var c = document.createElement('canvas'); return !!(c.getContext('webgl2') || c.getContext('webgl')); } catch (e) { return false; }
@@ -33,6 +52,14 @@
   /* ---------- 道の中心線（区間ごとの位置と向き） ---------- */
   function centerline(v, mirror) {
     var segs = v.segs, n = segs.length, spec = v.spec;
+    if (segs[0] && segs[0].wp) {   // 実在の道・実在のコース: 地図の座標そのもの（ずれない）
+      var hx0 = new Float64Array(n + 1), px0 = new Float64Array(n + 1), pz0 = new Float64Array(n + 1), py0 = new Float64Array(n + 1);
+      for (var q = 0; q < n; q++) { var w = segs[q].wp; hx0[q] = w.h; px0[q] = w.x; pz0[q] = w.z; py0[q] = w.y; }
+      var wl = segs[n - 1].wp, loop0 = !!spec.loop;
+      if (loop0) { hx0[n] = hx0[0] + Math.round((hx0[n - 1] - hx0[0]) / (2 * Math.PI)) * 2 * Math.PI; px0[n] = px0[0]; pz0[n] = pz0[0]; py0[n] = py0[0]; }
+      else { hx0[n] = wl.h; px0[n] = wl.x + Math.sin(wl.h) * M_SEG; pz0[n] = wl.z + Math.cos(wl.h) * M_SEG; py0[n] = wl.y; }
+      return { n: n, loop: loop0, h: hx0, x: px0, z: pz0, y: py0, real: true };
+    }
     var loop = !(spec.touge || spec.p2p || spec.noFinish || spec.stopZone || spec.finishAt);
     var total = 0, abs = 0;
     segs.forEach(function (s) { total += s.curve; abs += Math.abs(s.curve); });
@@ -76,7 +103,18 @@
   /* ---------- 道路のメッシュ ---------- */
   function buildRoad(v, cl, RW) {
     var THREE_ = THREE, segs = v.segs, n = cl.n, pal = v.pal;
-    var pos = [], cols = [];
+    var pos = [], cols = [], tpos = [], tcol = [], tuv = [];
+    var asph = R.tex3D('asphalt');
+    function quadT(i, a0, a1, c) {   // 写真の路面（アスファルト）
+      if (!asph) { quad(i, a0, a1, 0, 0, c); return; }
+      var j = cl.loop ? (i + 1) : Math.min(i + 1, n);
+      var A = rightOf(cl.h[i]), B = rightOf(cl.h[j]);
+      var p = [[cl.x[i] + A.x * a0, cl.y[i], cl.z[i] + A.z * a0], [cl.x[i] + A.x * a1, cl.y[i], cl.z[i] + A.z * a1],
+               [cl.x[j] + B.x * a1, cl.y[j], cl.z[j] + B.z * a1], [cl.x[j] + B.x * a0, cl.y[j], cl.z[j] + B.z * a0]];
+      var uv = [[a0 / 3.5, i * M_SEG / 3.5], [a1 / 3.5, i * M_SEG / 3.5], [a1 / 3.5, (i + 1) * M_SEG / 3.5], [a0 / 3.5, (i + 1) * M_SEG / 3.5]];
+      var k2 = 2.35;
+      [0, 2, 1, 0, 3, 2].forEach(function (k) { tpos.push(p[k][0], p[k][1], p[k][2]); tcol.push(Math.min(1, c.r * k2), Math.min(1, c.g * k2), Math.min(1, c.b * k2)); tuv.push(uv[k][0], uv[k][1]); });
+    }
     function quad(i, a0, a1, y0, y1, c, lift) {
       var j = cl.loop ? (i + 1) : Math.min(i + 1, n);
       var A = rightOf(cl.h[i]), B = rightOf(cl.h[j]);
@@ -95,17 +133,20 @@
                [cl.x[j] + B.x * a, cl.y[j] + y1, cl.z[j] + B.z * a], [cl.x[j] + B.x * a, cl.y[j] + y0, cl.z[j] + B.z * a]];
       [0, 1, 2, 0, 2, 3, 0, 2, 1, 0, 3, 2].forEach(function (k) { pos.push(p[k][0], p[k][1], p[k][2]); cols.push(c.r, c.g, c.b); });
     }
-    var RS = RW * 1.17, G = 90, lanes = v.geom.lanes;
+    var RS = RW * 1.17, G = 90, lanes = v.geom.lanes, real = !!cl.real && !!v.spec.custom;
     var white = col('#f2f2f2'), laneC = col(pal.lane), water = col(pal.water || '#2f7fc1'), black = col('#111111');
     for (var i = 0; i < n; i++) {
       var s = segs[i];
       var road = col(s.stopZone ? '#b71c1c' : s.cRoad), rum = col(s.cRumble), grass = col(s.cross ? s.cRoad : s.cGrass);
       if (s.finishLine) {
         for (var k = 0; k < 8; k++) quad(i, -RW + k * RW / 4, -RW + (k + 1) * RW / 4, 0, 0, (k + i) % 2 ? black : white);
-      } else quad(i, -RW, RW, 0, 0, road);
-      quad(i, -RS, -RW, 0, 0, rum); quad(i, RW, RS, 0, 0, rum);
+      } else if (s.stopZone || s.tunnel) quad(i, -RW, RW, 0, 0, road); else quadT(i, -RW, RW, road);
+      var RS2 = real ? RW * (1 + (s.rumW || 0.15)) : RS;
+      quad(i, -RS2, -RW, s.curb ? 0.15 : 0, s.curb ? 0.15 : 0, rum); quad(i, RW, RS2, s.curb ? 0.15 : 0, s.curb ? 0.15 : 0, rum);
+      if (s.curb) { wall(i, -RW, 0, 0.15, col('#8a8a86')); wall(i, RW, 0, 0.15, col('#8a8a86')); }
       var wl = s.waterSide && s.waterSide !== 'right', wr = s.waterSide && s.waterSide !== 'left';
       if (s.tunnel) { quad(i, -RS - 2, -RS, 0, 0, grass); quad(i, RS, RS + 2, 0, 0, grass); }
+      else if (real) { /* 周りの地面・水面は 3D の街（City3D）が描く */ }
       else {
         quad(i, -RS - G, -RS, wl ? -40 : -1.5, 0, grass);
         quad(i, RS, RS + G, 0, wr ? -40 : -1.5, grass);
@@ -115,7 +156,11 @@
       }
       // 白線
       if (!s.finishLine) {
-        if (s.alt) for (var l = 1; l < lanes; l++) { var lx = -RW + 2 * RW * l / lanes; quad(i, lx - 0.08, lx + 0.08, 0, 0, laneC, 0.02); }
+        for (var l = 1; l < lanes; l++) {
+          var lx = -RW + 2 * RW * l / lanes, ctr = v.spec.twoWay && l * 2 === lanes;
+          if (s.cross || (!s.alt && !(ctr && lanes >= 4))) continue;
+          quad(i, lx - 0.08, lx + 0.08, 0, 0, ctr && lanes >= 4 && real ? col('#f0c030') : laneC, 0.02);
+        }
         quad(i, -RW * 0.97, -RW * 0.94, 0, 0, white, 0.02); quad(i, RW * 0.94, RW * 0.97, 0, 0, white, 0.02);
         if (s.crosswalk) for (var c2 = 0; c2 < 10; c2 += 2) quad(i, -RW + c2 * RW / 5, -RW + (c2 + 1) * RW / 5, 0, 0, white, 0.02);
         if (s.stopLine) quad(i, -RW, 0, 0, 0, white, 0.03);
@@ -125,13 +170,24 @@
         wall(i, -RW * 1.2, 0, 6.5, wc); wall(i, RW * 1.2, 0, 6.5, wc);
         quad(i, -RW * 1.2, RW * 1.2, 6.5, 6.5, col('#1d1f25'));
       }
-      if (s.rails) { var rc = col('#c9ced4'); wall(i, -RW * 1.1, 0.35, 0.8, rc); wall(i, RW * 1.1, 0.35, 0.8, rc); }
+      if (s.rails) { var rc = col('#c9ced4'), ro = real ? RW + 0.8 : RW * 1.1; wall(i, -ro, 0.35, 0.8, rc); wall(i, ro, 0.35, 0.8, rc); }
+      if (s.bridge && real) { var bc2 = col('#9ea3a8'); wall(i, -RS2 - 0.2, -0.8, 1.0, bc2); wall(i, RS2 + 0.2, -0.8, 1.0, bc2); quad(i, -RS2 - 0.2, RS2 + 0.2, -0.8, -0.8, col('#7d8288')); }
     }
     var geo = new THREE_.BufferGeometry();
     geo.setAttribute('position', new THREE_.Float32BufferAttribute(pos, 3));
     geo.setAttribute('color', new THREE_.Float32BufferAttribute(cols, 3));
     geo.computeVertexNormals();
-    return new THREE_.Mesh(geo, new THREE_.MeshLambertMaterial({ vertexColors: true, side: THREE_.DoubleSide }));
+    var rm = new THREE_.Mesh(geo, new THREE_.MeshLambertMaterial({ vertexColors: true, side: THREE_.DoubleSide, polygonOffset: true, polygonOffsetFactor: -5, polygonOffsetUnits: -5 }));
+    rm.receiveShadow = true;
+    var grp = new THREE_.Group(); grp.add(rm);
+    if (tpos.length) {
+      var tg = new THREE_.BufferGeometry();
+      tg.setAttribute('position', new THREE_.Float32BufferAttribute(tpos, 3)); tg.setAttribute('color', new THREE_.Float32BufferAttribute(tcol, 3)); tg.setAttribute('uv', new THREE_.Float32BufferAttribute(tuv, 2));
+      tg.computeVertexNormals();
+      var tm = new THREE_.Mesh(tg, new THREE_.MeshLambertMaterial({ vertexColors: true, map: asph, side: THREE_.DoubleSide, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 }));
+      tm.receiveShadow = true; grp.add(tm);
+    }
+    return grp;
   }
 
   /* ---------- 沿道の物（インスタンス描画） ---------- */
@@ -143,7 +199,8 @@
       cyl: new T.CylinderGeometry(1, 1, 1, 6).translate(0, 0.5, 0),
       ball: new T.IcosahedronGeometry(1, 1),
       roof: new T.ConeGeometry(0.75, 1, 4).rotateY(Math.PI / 4).translate(0, 0.5, 0),
-      ring: new T.TorusGeometry(1, 0.05, 6, 24)
+      ring: new T.TorusGeometry(1, 0.05, 6, 24),
+      disc: new T.CylinderGeometry(1, 1, 0.04, 20).rotateX(Math.PI / 2)
     };
     function add(g, x, y, z, sx, sy, sz, rot, color, glow) {
       var key = g + (glow ? ':g' : '');
@@ -168,10 +225,13 @@
 
   function placeSprites(v, cl, RW, props) {
     var U = RW * 0.12, night = v.night, dynamic = [];
+    var city = !!v.cityOn;
     v.segs.forEach(function (s, i) {
       s.sprites.forEach(function (sp) {
+        if (city && (sp.kind === 'bldg' || sp.kind === 'noisewall' || sp.gen)) return;   // 街並みは City3D が描く
         var p = at(cl, i), r = rightOf(p.h), off = sp.offset * RW, x = p.x + r.x * off, z = p.z + r.z * off, y = p.y, rot = p.h, seed = sp.seed || i;
-        var u = U * (0.9 + (seed % 5) * 0.06);
+        var u = sp.city ? 1.1 : U * (0.9 + (seed % 5) * 0.06);
+        var fw = { x: Math.sin(p.h), z: Math.cos(p.h) }, inward = sp.offset > 0 ? -1 : 1;
         function A(g, dy, sx, sy, sz, c, glow, dx, dz) { props.add(g, x + (dx || 0) * r.x, y + dy, z + (dx || 0) * r.z + (dz || 0), sx, sy, sz, rot, c, glow); }
         switch (sp.kind) {
           case 'tree': A('cyl', 0, u * 0.2, u * 2, u * 0.2, '#5b3a1e'); A('cone', u * 1.6, u * 2, u * 4.6, u * 2, '#236b2a'); break;
@@ -196,10 +256,27 @@
           case 'container': for (var k = 0; k < 1 + seed % 3; k++) A('box', k * u * 1.9, u * 5.2, u * 1.8, u * 2, ['#c62828', '#1565c0', '#2e7d32', '#ef6c00'][(seed + k) % 4]); break;
           case 'crane': A('box', 0, u * 0.6, u * 14, u * 0.6, '#f9a825', false, -u * 3); A('box', 0, u * 0.6, u * 14, u * 0.6, '#f9a825', false, u * 3); A('box', u * 14, u * 12, u * 0.8, u * 1, '#f9a825'); break;
           case 'barrier': case 'soundwall': A('box', 0, u * 0.3, sp.kind === 'soundwall' ? u * 3 : u * 1.2, u * 6, sp.kind === 'soundwall' ? '#9aa7b3' : '#9e9e9e'); break;
-          case 'billboard': case 'sign': case 'greensign': case 'limitsign': case 'unagi': case 'gyoza': case 'piano':
-            A('cyl', 0, u * 0.12, u * 3, u * 0.12, '#555');
-            A('box', u * 3, u * 0.2, u * 2, u * 3.5, { billboard: '#fafafa', sign: '#f2f2f2', greensign: '#1b7a3e', limitsign: '#d32f2f', unagi: '#1a237e', gyoza: '#c62828', piano: '#222' }[sp.kind]);
+          case 'limitsign':   // 丸い制限速度標識（運転手の方を向く）
+            A('cyl', 0, 0.05, 2.6, 0.05, '#777');
+            props.add('disc', x, y + 2.9, z, 0.45, 0.45, 0.45, rot, '#d32f2f');
+            props.add('disc', x - fw.x * 0.02, y + 2.9, z - fw.z * 0.02, 0.36, 0.36, 0.36, rot, '#ffffff');
             break;
+          case 'billboard': case 'sign': case 'greensign': case 'unagi': case 'gyoza': case 'piano':
+            A('cyl', 0, u * 0.12, u * 3, u * 0.12, '#555');
+            A('box', u * 3, u * 3.5, u * 2, u * 0.2, { billboard: '#fafafa', sign: '#f2f2f2', greensign: '#1b7a3e', unagi: '#1a237e', gyoza: '#c62828', piano: '#222' }[sp.kind]);
+            break;
+          case 'pole':   // 電柱
+            A('cyl', 0, 0.17, 11, 0.17, '#a3a6a5'); A('box', 10.4, 1.8, 0.12, 0.12, '#6b6e70'); A('box', 9.6, 1.4, 0.1, 0.1, '#6b6e70');
+            if ((sp.id || 0) % 3 === 0) A('cyl', 8, 0.35, 1, 0.35, '#8d9499', false, inward * 0.5);
+            dynamic.push({ kind: 'pole', x: x, y: y + 10.4, z: z, side: sp.offset > 0 ? 1 : -1 });
+            break;
+          case 'streetlamp': case 'hwlamp':
+            var lh = sp.kind === 'hwlamp' ? 10.5 : 8.2;
+            A('cyl', 0, 0.12, lh, 0.12, '#6c7278'); A('box', lh, 2.6, 0.14, 0.14, '#6c7278', false, inward * 1.3);
+            A('box', lh - 0.15, 0.9, 0.18, 0.4, v.night ? '#fff1b8' : '#d7dbe0', v.night, inward * 2.5);
+            break;
+          case 'broadleaf':
+            A('cyl', 0, 0.22, 3.2, 0.22, '#4e3b2c'); A('ball', 4.6, 2.6, 2.3, 2.6, ['#3f6b3a', '#4b7a3f', '#355f33', '#56813f'][seed % 4]); break;
           case 'grandstand': for (k = 0; k < 4; k++) A('box', k * u * 1.6, u * (6 - k * 1.2), u * 1.6, u * 14, k % 2 ? '#78909c' : '#90a4ae', false, u * k * 1.4); break;
           case 'tyrewall': A('box', 0, u * 1, u * 2, u * 4, '#222'); break;
           case 'neon': A('cyl', 0, u * 0.3, u * 9, u * 0.3, seed % 2 ? '#00e5ff' : '#ff00c8', true); break;
@@ -218,16 +295,22 @@
           case 'snowman': A('ball', u * 1.1, u * 1.1, u * 1.1, u * 1.1, '#ffffff'); A('ball', u * 2.7, u * 0.75, u * 0.75, u * 0.75, '#ffffff'); break;
           case 'tollgate': for (k = -2; k <= 2; k++) A('box', 0, u * 0.8, u * 4, u * 0.8, '#607d8b', false, k * u * 2.6); A('box', u * 4, u * 1.2, u * 1, u * 13, '#eceff1'); break;
           case 'gantry': case 'cpgate': case 'arch': case 'banner': case 'fork': case 'orbis':
-            var hw2 = RW * 1.15;
-            A('cyl', 0, 0.15, 6, 0.15, '#444', false, -hw2); A('cyl', 0, 0.15, 6, 0.15, '#444', false, hw2);
-            A('box', 5.4, 0.3, sp.kind === 'fork' ? 1.8 : 1.1, hw2 * 2, { gantry: '#eeeeee', cpgate: '#1565c0', arch: '#00e5ff', banner: '#0d47a1', fork: '#1b7a3e', orbis: '#263238' }[sp.kind], sp.kind === 'arch');
+            // 道をまたぐ門・案内標識（板は道を横切る向き）
+            var hw2 = RW * 1.15, cx0 = p.x, cz0 = p.z;
+            props.add('cyl', cx0 - r.x * hw2, y, cz0 - r.z * hw2, 0.15, 6.2, 0.15, rot, '#555');
+            props.add('cyl', cx0 + r.x * hw2, y, cz0 + r.z * hw2, 0.15, 6.2, 0.15, rot, '#555');
+            props.add('box', cx0, y + 5.2, cz0, hw2 * 2, sp.kind === 'fork' ? 2.0 : 1.1, 0.25, rot, { gantry: '#eeeeee', cpgate: '#1565c0', arch: '#00e5ff', banner: '#0d47a1', fork: sp.blue ? '#1d4fa3' : '#1b7a3e', orbis: '#263238' }[sp.kind], sp.kind === 'arch');
+            if (sp.kind === 'fork' || sp.kind === 'banner') dynamic.push({ kind: 'signtext', x: cx0 - fw.x * 0.14, y: y + 5.2, z: cz0 - fw.z * 0.14, rot: rot, w: hw2 * 2, h: sp.kind === 'fork' ? 2.0 : 1.1, texts: sp.texts || [sp.text], blue: sp.blue });
             break;
-          case 'signal':
-            A('cyl', 0, 0.12, 5.4, 0.12, '#555', false, RW * 1.25 - off);
-            A('box', 5.2, 0.4, 0.5, 1.8, '#2b2f36', false, RW * 0.6 - off);
-            dynamic.push({ kind: 'signal', x: x, y: y + 5.45, z: z, r: r, rot: rot, off: RW * 0.6 - off });
+          case 'signal':   // 横型の信号機。柱は道の外、灯器は車線の上で運転手の方を向く
+            var sOff = sp.offset * RW, armTo = sp.offset > 0 ? RW * 0.35 : -RW * 0.35;
+            props.add('cyl', p.x + r.x * sOff, y, p.z + r.z * sOff, 0.14, 6.2, 0.14, rot, '#5b5f63');
+            var ax = (sOff + armTo) / 2;
+            props.add('box', p.x + r.x * ax, y + 5.9, p.z + r.z * ax, Math.abs(sOff - armTo), 0.12, 0.12, rot, '#5b5f63');
+            props.add('box', p.x + r.x * armTo, y + 5.5, p.z + r.z * armTo, 1.9, 0.55, 0.35, rot, '#2b2f36');
+            dynamic.push({ kind: 'signal', x: p.x + r.x * armTo - fw.x * 0.2, y: y + 5.5, z: p.z + r.z * armTo - fw.z * 0.2, r: r, rot: rot });
             break;
-          case 'chevron': A('cyl', 0, 0.08, 1.5, 0.08, '#333'); A('box', 1.4, 0.1, 0.9, 1.8, '#ffd93d'); break;
+          case 'chevron': A('cyl', 0, 0.08, 1.5, 0.08, '#333'); A('box', 1.4, 1.8, 0.9, 0.1, '#ffd93d'); break;
           default: break;
         }
       });
@@ -282,6 +365,7 @@
       // 影
       var sh = new T.Mesh(new T.PlaneGeometry(W * 1.15, Lg * 1.05), new T.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.35, depthWrite: false }));
       sh.rotation.x = -Math.PI / 2; sh.position.y = 0.02; g.add(sh);
+      g.traverse(function (o) { if (o.isMesh && o !== sh) o.castShadow = true; });
       carCache[key] = g;
     }
     return carCache[key].clone();
@@ -320,44 +404,96 @@
   R.Render3D = function (canvas, sess) {
     var T = THREE;
     var renderer = new T.WebGLRenderer({ canvas: canvas, antialias: true, alpha: false, powerPreference: 'high-performance' });
-    renderer.setPixelRatio(1);
+    renderer.setPixelRatio(Math.min(1.5, window.devicePixelRatio || 1));
     renderer.outputEncoding = T.sRGBEncoding;
+    renderer.toneMapping = T.ACESFilmicToneMapping; renderer.toneMappingExposure = 0.92;
+    renderer.shadowMap.enabled = true; renderer.shadowMap.type = T.PCFSoftShadowMap;
     renderer.setSize(canvas.width, canvas.height, false);
-    var stage = null;
+    var stage = null, city = null;
+
+    function textPlane(d) {   // 案内標識の文字
+      var c = document.createElement('canvas'); c.width = 512; c.height = Math.round(512 * d.h / d.w) || 64;
+      var g = c.getContext('2d');
+      g.fillStyle = d.blue ? '#1d4fa3' : '#1b7a3e'; g.fillRect(0, 0, c.width, c.height);
+      g.strokeStyle = '#fff'; g.lineWidth = 4; g.strokeRect(6, 6, c.width - 12, c.height - 12);
+      g.fillStyle = '#fff'; g.textAlign = 'center'; g.textBaseline = 'middle';
+      var n = d.texts.length, fs = Math.min(c.height * 0.42, 512 / n / Math.max(4, Math.max.apply(null, d.texts.map(function (t) { return t.length; }))) * 1.7);
+      g.font = 'bold ' + Math.round(fs) + 'px sans-serif';
+      d.texts.forEach(function (t, i) { g.fillText(t, c.width * (i + 0.5) / n, c.height / 2); });
+      var tex = new T.CanvasTexture(c); tex.encoding = T.sRGBEncoding;
+      var m = new T.Mesh(new T.PlaneGeometry(d.w * 0.98, d.h * 0.94), new T.MeshBasicMaterial({ map: tex }));
+      m.position.set(d.x, d.y, d.z); m.rotation.set(0, d.rot + Math.PI, 0);
+      return m;
+    }
 
     function build(s) {
       if (stage) dispose();
       var v = s.view(), scene = new T.Scene();
+      var world = !!(v.spec.custom && R.Map && R.Map.ready && v.segs[0] && v.segs[0].wp && v.spec.mapEdge !== undefined);
+      v.cityOn = world;
       var RW = 0.9 / v.geom.cw;
       var cl = centerline(v, s.cfg.mirror);
       scene.background = skyTexture(v);
-      var far = { fog: 170, rain: 380, snow: 320, sand: 400, ash: 350 }[v.weather] || (v.night ? 520 : 900);
-      scene.fog = new T.Fog(new T.Color(v.pal.fog), far * 0.25, far);
-      var hemi = new T.HemisphereLight(v.night ? 0x445577 : 0xcfe0f0, v.night ? 0x111118 : 0x3a4436, v.night ? 0.5 : 0.62);
+      var skyT = !v.night && (v.weather === 'clear' || !v.weather) ? R.tex3D('sky') : null, dome = null;
+      if (skyT) {
+        dome = new T.Mesh(new T.SphereGeometry(world ? 5000 : 2200, 48, 24, 0, Math.PI * 2, 0, Math.PI * 0.5625), new T.MeshBasicMaterial({ map: skyT, side: T.BackSide, fog: false, depthWrite: false }));
+        dome.renderOrder = -1; scene.add(dome);
+      }
+      var far = { fog: 170, rain: 380, snow: 320, sand: 400, ash: 350 }[v.weather] || (v.night ? 520 : world ? 2200 : 900);
+      scene.fog = new T.Fog(new T.Color(v.pal.fog), far * (world ? 0.18 : 0.25), far);
+      var hemi = new T.HemisphereLight(v.night ? 0x445577 : 0xdfeaf5, v.night ? 0x111118 : 0x4a5440, v.night ? 0.5 : 0.75);
       scene.add(hemi);
-      var sun = new T.DirectionalLight(v.night ? 0x8899cc : 0xfff0d8, v.night ? 0.3 : 0.7);
-      sun.position.set(80, 140, 40); scene.add(sun);
+      var sun = new T.DirectionalLight(v.night ? 0x8899cc : 0xfff0d8, v.night ? 0.3 : 1.15);
+      sun.position.set(120, 180, 60); sun.castShadow = !v.night;
+      sun.shadow.mapSize.set(2048, 2048);
+      var sc = sun.shadow.camera; sc.left = -70; sc.right = 70; sc.top = 70; sc.bottom = -70; sc.near = 10; sc.far = 500;
+      sun.shadow.bias = -0.0006;
+      scene.add(sun); scene.add(sun.target);
       scene.add(buildRoad(v, cl, RW));
       var props = Props(scene, v.night);
       var dyn = placeSprites(v, cl, RW, props);
       props.finish();
-      var hz = horizon(v); scene.add(hz);
-      var cam = new T.PerspectiveCamera(62, canvas.width / canvas.height, 0.3, 2500);
+      var hz = null;
+      if (!world) { hz = horizon(v); scene.add(hz); }
+      if (world) {
+        if (!city) city = R.City3D(scene, { night: v.night });
+        else scene.add(city.group);
+        var p0 = at(cl, v.pz / R.SEG);
+        city.update(p0.x, p0.z);
+      }
+      var cam = new T.PerspectiveCamera(62, canvas.width / canvas.height, 0.3, world ? 6000 : 2500);
       var me = carModel(v.car.body, v.car.color); scene.add(me);
       var head = null;
       if (v.night || v.spec.lava) {
         head = new T.SpotLight(0xfff2cc, 2.2, 90, 0.45, 0.5, 1.2); scene.add(head); scene.add(head.target);
       }
-      // 信号の灯り
+      // 信号の灯り（青・黄・赤。運転手の方を向く）
       var sigMeshes = dyn.filter(function (d) { return d.kind === 'signal'; }).map(function (d) {
         var gg = new T.Group();
         ['#00e0a0', '#ffc400', '#ff2a2a'].forEach(function (c, i) {
-          var m = new T.Mesh(new T.SphereGeometry(0.16, 10, 8), new T.MeshBasicMaterial({ color: 0x15181d }));
-          m.position.set(d.r.x * (d.off - 0.55 + i * 0.55), 0, d.r.z * (d.off - 0.55 + i * 0.55) + 0.3); m.userData.on = c; gg.add(m);
+          var m = new T.Mesh(new T.CylinderGeometry(0.17, 0.17, 0.06, 14).rotateX(Math.PI / 2), new T.MeshBasicMaterial({ color: 0x15181d }));
+          var o = (i - 1) * 0.58;
+          m.position.set(d.r.x * o, 0, d.r.z * o); m.rotation.set(0, d.rot, 0); m.userData.on = c; gg.add(m);
         });
         gg.position.set(d.x, d.y, d.z); scene.add(gg); return gg;
       });
-      stage = { s: s, v: v, scene: scene, cl: cl, RW: RW, cam: cam, me: me, head: head, hz: hz, pool: {}, sig: sigMeshes, camPos: null };
+      // 案内標識の文字
+      dyn.filter(function (d) { return d.kind === 'signtext'; }).forEach(function (d) { scene.add(textPlane(d)); });
+      // 電線
+      var poles = dyn.filter(function (d) { return d.kind === 'pole'; }), wp = [];
+      [-1, 1].forEach(function (sd) {
+        var ps = poles.filter(function (d) { return d.side === sd; });
+        for (var i = 0; i + 1 < ps.length; i++) for (var k = 0; k < 2; k++) {
+          var a = ps[i], b = ps[i + 1], dy = k * 0.8;
+          for (var q = 0; q < 6; q++) {
+            var t1 = q / 6, t2 = (q + 1) / 6, sag1 = Math.sin(t1 * Math.PI) * 0.6, sag2 = Math.sin(t2 * Math.PI) * 0.6;
+            wp.push(a.x + (b.x - a.x) * t1, a.y - dy + (b.y - a.y) * t1 - sag1, a.z + (b.z - a.z) * t1, a.x + (b.x - a.x) * t2, a.y - dy + (b.y - a.y) * t2 - sag2, a.z + (b.z - a.z) * t2);
+          }
+        }
+      });
+      if (wp.length) { var wg = new T.BufferGeometry(); wg.setAttribute('position', new T.Float32BufferAttribute(wp, 3)); scene.add(new T.LineSegments(wg, new T.LineBasicMaterial({ color: 0x2a2a2e }))); }
+      if (dome && hz) hz.material.opacity = 0.55;
+      stage = { s: s, v: v, scene: scene, cl: cl, RW: RW, cam: cam, me: me, head: head, hz: hz, pool: {}, sig: sigMeshes, camPos: null, sun: sun, world: world, dome: dome };
     }
 
     function place(obj, total, offset, yaw, extraY) {
@@ -394,7 +530,11 @@
       st.cam.lookAt(st.me.position.x * 0.6 + (ahead.x + rightOf(ahead.h).x * P.x * st.RW) * 0.4, st.me.position.y + 1.1, st.me.position.z * 0.6 + (ahead.z + rightOf(ahead.h).z * P.x * st.RW) * 0.4);
       var fov = 62 + (P.boosting ? 8 : 0) + Math.min(6, P.speed / R.MAX * 6);
       if (Math.abs(st.cam.fov - fov) > 0.1) { st.cam.fov += (fov - st.cam.fov) * 0.15; st.cam.updateProjectionMatrix(); }
-      st.hz.position.x = st.cam.position.x; st.hz.position.z = st.cam.position.z;
+      if (st.hz) { st.hz.position.x = st.cam.position.x; st.hz.position.z = st.cam.position.z; }
+      if (st.dome) st.dome.position.set(st.cam.position.x, st.cam.position.y - 40, st.cam.position.z);
+      st.sun.position.set(st.me.position.x + 120, st.me.position.y + 180, st.me.position.z + 60);
+      st.sun.target.position.copy(st.me.position);
+      if (st.world && city) city.update(st.me.position.x, st.me.position.z);
       if (st.head) { st.head.position.set(st.me.position.x, st.me.position.y + 1, st.me.position.z); st.head.target.position.set(st.me.position.x + f.x * 30, st.me.position.y, st.me.position.z + f.z * 30); }
       st.sig.forEach(function (gg) {
         gg.children.forEach(function (m, i) { var on = ['green', 'yellow', 'red'][i] === v.signal; m.material.color.set(on ? m.userData.on : '#15181d'); });
@@ -404,6 +544,7 @@
 
     function dispose() {
       if (!stage) return;
+      if (city) stage.scene.remove(city.group);   // 街は次の道でも使い回す
       stage.scene.traverse(function (o) {
         if (o.geometry && !o.userData.shared) o.geometry.dispose();
         if (o.material) { (Array.isArray(o.material) ? o.material : [o.material]).forEach(function (m) { if (m.map) m.map.dispose(); m.dispose(); }); }
@@ -417,7 +558,7 @@
       render: render,
       rebuild: function (s) { build(s); },
       resize: function (w, h) { renderer.setSize(w, h, false); if (stage) { stage.cam.aspect = w / h; stage.cam.updateProjectionMatrix(); } },
-      dispose: function () { dispose(); renderer.dispose(); }
+      dispose: function () { dispose(); if (city) { city.dispose(); city = null; } renderer.dispose(); }
     };
   };
 })();
