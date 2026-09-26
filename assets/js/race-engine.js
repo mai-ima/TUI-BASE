@@ -931,7 +931,7 @@
 
   /* ---------- 顔（会話の場面で使う 24×24 の絵） ---------- */
 
-  function drawPortrait(cv, f) {
+  function drawPortrait(cv, f, emo) {
     var g = cv.getContext('2d'), N = 24, p = cv.width / N;
     function px(x, y, w, h, c) { g.fillStyle = c; g.fillRect(Math.round(x * p), Math.round(y * p), Math.ceil(w * p), Math.ceil(h * p)); }
     px(0, 0, N, N, f.bg);
@@ -948,8 +948,16 @@
       case 'hood': px(4, 2, 16, 4, hair); px(3, 4, 3, 16, hair); px(18, 4, 3, 16, hair); break;
       case 'bald': px(6, 4, 12, 2, shade(f.skin, 1.08)); break;
     }
-    px(8, 10, 2, 2, f.eyes); px(14, 10, 2, 2, f.eyes); px(8, 10, 1, 1, '#fff'); px(14, 10, 1, 1, '#fff');
-    px(10, 15, 4, 1, shade(f.skin, 0.6));
+    var mouth = shade(f.skin, 0.6), brow = shade(f.hair === f.skin ? '#555555' : f.hair, 0.8);
+    if (emo === 'shock') { px(7, 9, 4, 3, '#fff'); px(13, 9, 4, 3, '#fff'); px(8, 10, 1, 1, f.eyes); px(14, 10, 1, 1, f.eyes); }
+    else if (emo === 'cool') { px(8, 11, 2, 1, f.eyes); px(14, 11, 2, 1, f.eyes); }
+    else if (emo === 'smile') { px(8, 10, 2, 1, f.eyes); px(14, 10, 2, 1, f.eyes); px(7, 11, 1, 1, f.eyes); px(10, 11, 1, 1, f.eyes); px(13, 11, 1, 1, f.eyes); px(16, 11, 1, 1, f.eyes); }
+    else { px(8, 10, 2, 2, f.eyes); px(14, 10, 2, 2, f.eyes); px(8, 10, 1, 1, '#fff'); px(14, 10, 1, 1, '#fff'); }
+    if (emo === 'angry') { px(7, 8, 1, 1, brow); px(8, 8, 1, 1, brow); px(9, 9, 2, 1, brow); px(13, 9, 2, 1, brow); px(15, 8, 2, 1, brow); px(10, 15, 4, 1, mouth); px(9, 16, 1, 1, mouth); px(14, 16, 1, 1, mouth); }
+    else if (emo === 'sad') { px(9, 8, 2, 1, brow); px(7, 9, 2, 1, brow); px(13, 8, 2, 1, brow); px(15, 9, 2, 1, brow); px(10, 16, 4, 1, mouth); px(9, 15, 1, 1, mouth); px(14, 15, 1, 1, mouth); }
+    else if (emo === 'smile') { px(9, 14, 1, 1, mouth); px(14, 14, 1, 1, mouth); px(10, 15, 4, 1, mouth); }
+    else if (emo === 'shock') { px(11, 14, 2, 3, '#3a1010'); }
+    else px(10, 15, 4, 1, mouth);
     switch (f.acc) {
       case 'goggles': px(6, 4, 12, 2, '#5d4037'); px(7, 4, 4, 2, '#80deea'); px(13, 4, 4, 2, '#80deea'); break;
       case 'headset': px(5, 8, 1, 5, '#222'); px(18, 8, 1, 5, '#222'); px(5, 3, 14, 1, '#222'); px(15, 14, 4, 1, '#222'); break;
@@ -1078,6 +1086,7 @@
       };
       if (mode === 'duel' || mode === 'drag') { c.total = PLAYER_Z; c.offset = -0.45; }
       else if (mode === 'touge') { c.total = PLAYER_Z + SEG * 7; c.offset = 0; }
+      else if (mode === 'sp') { c.total = PLAYER_Z + SEG * 2; c.offset = -0.5; }
       else if (mode === 'chase') { c.total = PLAYER_Z + SEG * 45; c.offset = 0; }
       else {
         var row = Math.floor(i / 2);
@@ -1087,7 +1096,7 @@
       c.target = c.offset;
       return c;
     });
-    if (mode === 'duel' || mode === 'drag') P.x = 0.45;
+    if (mode === 'duel' || mode === 'drag' || mode === 'sp') P.x = 0.45;
     if (cfg.start) {   // 前の道から引き継ぐ（オープンワールド）
       ['speed', 'x', 'nitro', 'damage', 'total'].forEach(function (k) { if (cfg.start[k] !== undefined) P[k] = cfg.start[k]; });
       if (cfg.start.frac !== undefined) P.total = clamp(cfg.start.frac, 0, 0.95) * trackLen;
@@ -1101,6 +1110,21 @@
     var dragLen = goalDist;
     if (p2p) laps = 1;
     var gates = [], penalty = 0;
+    /* --- SP バトルと無線 --- */
+    var spg = { me: 100, foe: 100 };
+    var radioQ = cfg.radio ? cfg.radio.map(function (r) { return { at: r.at, who: r.who, text: r.text, used: 0 }; }) : [];
+    var radio = null, evCool = {}, damageSaid = false;
+    function event(name) {
+      if (demo) return;
+      if (evCool[name] > 0) return;
+      evCool[name] = 10;
+      var r = radioQ.filter(function (x) { return x.at === name && x.used < (name === 'overtook' || name === 'overtaken' || name === 'damage' ? 2 : 1); })[0];
+      if (!r) return;
+      r.used++;
+      var ch = R.CHARS[r.who] || { name: r.who, color: '#fff' };
+      radio = { who: r.who, name: TB.t(ch.name), color: ch.color, text: TB.t(r.text), t: 4.2 };
+      sfx('click');
+    }
     /* --- 交差点の信号・交差車両・警察 --- */
     var sig = { phase: 'green', t: Math.random() * 14, cross: [], crossT: 0 };
     var cops = [], wantedT = 0, escapeT = 0, bustHits = 0, orbisDone = false, stopDone = false;
@@ -1203,7 +1227,7 @@
     });
     if (mode === 'coins') segs.forEach(function (sg, i) { if (i > 30 && i % 9 === 0 && !sg.tunnel) sg.objs.push({ kind: 'coin', offset: [-0.6, 0, 0.6][Math.floor(i / 9) % 3] + Math.sin(i) * 0.1 }); });
     var targetCar = cars.filter(function (c) { return c.isTarget; })[0] || null;
-    var bossCar = cars.filter(function (c) { return c.boss; })[0] || (mode === 'touge' ? cars[0] : null);
+    var bossCar = cars.filter(function (c) { return c.boss; })[0] || (mode === 'touge' || mode === 'sp' ? cars[0] : null);
 
     /* --- 一般車 --- */
     var traffic = [];
@@ -1275,6 +1299,8 @@
       useGeom();
       t0 += dt;
       if (msg.t > 0) msg.t -= dt;
+      if (radio) { radio.t -= dt; if (radio.t <= 0) radio = null; }
+      for (var ek in evCool) if (evCool[ek] > 0) evCool[ek] -= dt;
       popups.forEach(function (p) { p.t -= dt; });
       popups = popups.filter(function (p) { return p.t > 0; });
       if (flash > 0) flash -= dt;
@@ -1285,7 +1311,7 @@
         countT -= dt;
         var after = Math.ceil(countT);
         if (after !== before && after >= 1 && after <= 3) sfx('count');
-        if (countT <= 0) { state = 'race'; say('GO!', 1); sfx('go'); }
+        if (countT <= 0) { state = 'race'; say('GO!', 1); sfx('go'); setTimeout(function () { event('start'); }, 700); }
         eng.update({ speed: 0, throttle: keys.up, rain: weather === 'rain' });
         moveTraffic(dt);
         return;
@@ -1447,6 +1473,28 @@
         end('finish');
       }
       if (mode === 'world') worldRules(dt);
+      if (!P.finished && state === 'race') {
+        var foe0 = bossCar || cars[0];
+        if (foe0) {
+          var fg = foe0.total - pz();
+          if (fg > 0 && fg < SEG * 8) event('close');
+          if (fg < -SEG * 30) event('ahead');
+        }
+        if (P.damage > 0.5 && !damageSaid) { damageSaid = true; event('damage'); }
+        if (p2p && goalDist < Infinity && P.total > goalDist * 0.78) event('final');
+        if (mode === 'sp' && cars[0]) {
+          var sg2 = cars[0].total - pz(), m2 = Math.abs(sg2) / SEG * MPS;
+          var drain = Math.min(11, 0.6 + m2 * 0.05) * dt;
+          if (sg2 > SEG * 1.5) spg.me -= drain; else if (sg2 < -SEG * 1.5) spg.foe -= drain;
+          if (spg.me <= 0 || spg.foe <= 0) {
+            spg.me = Math.max(0, spg.me); spg.foe = Math.max(0, spg.foe);
+            P.place = spg.foe <= 0 ? 1 : 2;
+            say(P.place === 1 ? L('SP バトル 勝利！', 'SP BATTLE WON!') : L('SP 切れ…', 'OUT OF SPIRIT...'), 3);
+            sfx(P.place === 1 ? 'win' : 'bad'); event(P.place === 1 ? 'win' : 'lose');
+            end('finish');
+          }
+        }
+      }
       recordGhost();
       if (mode !== 'world' && mode !== 'brake' && !p2p) lapCheck();
       modeRules(dt);
@@ -1456,9 +1504,10 @@
       dyn = dyn.filter(function (o) { return o.life > 0; });
 
       // 順位が上がったら知らせる
-      if (!demo && (mode === 'race' || mode === 'duel' || mode === 'elim' || mode === 'touge') && !P.finished) {
+      if (!demo && (mode === 'race' || mode === 'duel' || mode === 'elim' || mode === 'touge' || mode === 'sp') && !P.finished) {
         var rk = rank();
-        if (prevRank !== null && rk < prevRank && raceT > 2) { pop(L('▲ ' + rk + ' 位', '▲ P' + rk), '#5ccfa0'); overtakes += prevRank - rk; }
+        if (prevRank !== null && rk < prevRank && raceT > 2) { pop(L('▲ ' + rk + ' 位', '▲ P' + rk), '#5ccfa0'); overtakes += prevRank - rk; event('overtook'); }
+        else if (prevRank !== null && rk > prevRank && raceT > 2) event('overtaken');
         prevRank = rk;
       }
 
@@ -1484,6 +1533,7 @@
 
     function hurt(n) {
       P.damage = Math.min(1.2, P.damage + n * dmgTaken);
+      if (mode === 'sp') spg.me -= n * 60;
       if (mode === 'traffic' && P.damage >= 1 && !P.finished) end('wrecked');
     }
 
@@ -1603,8 +1653,8 @@
         else { say(L('ゴール！', 'FINISH!'), 3); sfx('win'); }
         end('finish');
       } else if (P.lap === laps - 1 && laps > 1) {
-        say(L('ファイナルラップ', 'FINAL LAP'), 1.8);
-      }
+        say(L('ファイナルラップ', 'FINAL LAP'), 1.8); event('final');
+      } else event('lap');
     }
 
     function eliminate() {
@@ -1795,13 +1845,18 @@
       });
       if (mode === 'elim') list = list.concat(eliminated.filter(function (e) { return !e.you; }).reverse().map(function (e) { return { name: e.name, color: e.color, time: null, out: true }; }));
       if (mode === 'elim' && P.endReason === 'eliminated') list = list.filter(function (e) { return !e.you; }).concat([{ name: 'YOU', you: true, time: null, out: true }]);
+      if ((mode === 'sp' || mode === 'touge' || mode === 'drag') && P.place) {   // 勝敗はバトルの決まりで決める
+        var me = list.filter(function (r) { return r.you; })[0];
+        list = list.filter(function (r) { return !r.you; });
+        list.splice(Math.min(P.place - 1, list.length), 0, me);
+      }
       var place = list.findIndex(function (r) { return r.you; }) + 1;
       result = {
         mode: mode, track: cfg.track, place: place, list: list, reason: P.endReason,
         time: P.finishTime, best: P.bestLap, laps: P.laps.slice(), score: Math.round(score), near: nearCount,
         maxCombo: maxCombo, caught: !!(targetCar && targetCar.caught), damage: P.damage, topKmh: topKmh,
         overtakes: overtakes, ghost: newGhost, km: R._km || 0, field: cars.length, coins: coinsGot,
-        stopDist: P.stopDist, maxKmh: kmh(P.maxSpeed), penalty: penalty, total: (mode === 'gymkhana' ? (P.finishTime || 0) + penalty : P.finishTime)
+        stopDist: P.stopDist, maxKmh: kmh(P.maxSpeed), sp: { me: Math.round(spg.me), foe: Math.round(spg.foe) }, penalty: penalty, total: (mode === 'gymkhana' ? (P.finishTime || 0) + penalty : P.finishTime)
       };
       R._km = 0;
       eng.stop();
@@ -1934,7 +1989,7 @@
       var lean = keys.left ? -1 : keys.right ? 1 : 0;
       var myW = (DEPTH / PLAYER_Z) * CAR_W * 2 * ROAD_W * W / 2;
       var spinX = P.spin > 0 ? Math.sin(raceT * 20) * 10 : 0;
-      drawCar(g, W / 2 + spinX, H - 14 + bounce, myW, car.color, car.body, { brake: keys.down, boost: P.boosting, lean: lean, t: t0, siren: car.siren });
+      if (!cfg.hideCar) drawCar(g, W / 2 + spinX, H - 14 + bounce, myW, car.color, car.body, { brake: keys.down, boost: P.boosting, lean: lean, t: t0, siren: car.siren });
       parts.forEach(function (p) {
         g.globalAlpha = clamp(p.life / p.max, 0, 1);
         g.fillStyle = p.color;
@@ -2203,7 +2258,7 @@
     }
     function hud0(g) {
       var narrow = W < 500;
-      var racing = mode === 'race' || mode === 'duel' || mode === 'elim' || mode === 'touge';
+      var racing = mode === 'race' || mode === 'duel' || mode === 'elim' || mode === 'touge' || mode === 'sp';
       var place = P.finished && P.place ? P.place : rank();
 
       // 左上: 順位・周回（モードで中身が変わる）
@@ -2254,6 +2309,14 @@
       if (hud) { /* 表示済み */ } else if (mode === 'arcade' || mode === 'chase' || mode === 'coins') {
         text(g, L('残り時間', 'TIME'), cx, 20, 9, '#9fb0c2', 'center');
         text(g, Math.ceil(timer) + '', cx, 46, 24, timer < 10 ? '#ff5252' : '#ffd93d', 'center');
+      } else if (mode === 'sp') {
+        var bw2 = tw / 2 - 16;
+        text(g, L('あなた', 'YOU'), cx - tw / 2 + 10, 22, 9, '#5ccfa0');
+        text(g, (cars[0] ? cars[0].name : ''), cx + tw / 2 - 10, 22, 9, '#ff8a80', 'right');
+        meter(g, cx - tw / 2 + 10, 30, bw2, 10, spg.me / 100, spg.me < 30 ? '#ff5252' : '#5ccfa0', '');
+        g.fillStyle = 'rgba(255,255,255,.12)'; g.fillRect(cx + 6, 30, bw2, 10);
+        g.fillStyle = spg.foe < 30 ? '#ff5252' : '#ff8a80'; g.fillRect(cx + 6 + bw2 * (1 - clamp(spg.foe / 100, 0, 1)), 30, bw2 * clamp(spg.foe / 100, 0, 1), 10);
+        text(g, 'SP', cx, 47, 10, '#ffd93d', 'center');
       } else if (mode === 'gymkhana') {
         text(g, fmt((raceT + penalty) * 1000), cx, 30, 18, '#fff', 'center');
         text(g, L('ペナルティ +', 'PENALTY +') + penalty + 's', cx, 45, 10, penalty ? '#ff8a80' : '#9fb0c2', 'center');
@@ -2271,7 +2334,7 @@
         text(g, L('ベスト ', 'BEST ') + fmt(P.bestLap !== null ? (cfg.bestLap !== undefined && cfg.bestLap !== null ? Math.min(P.bestLap, cfg.bestLap) : P.bestLap) : cfg.bestLap), cx, 45, 10, '#9fb0c2', 'center');
       }
       // ボス・逃走車との差
-      var foe = targetCar || (mode === 'duel' || mode === 'race' || mode === 'touge' ? bossCar : null);
+      var foe = targetCar || (mode === 'duel' || mode === 'race' || mode === 'touge' || mode === 'sp' ? bossCar : null);
       if (foe && !foe.out) {
         var gapM = Math.round((foe.total - pz()) / SEG * MPS);
         panel(g, cx - tw / 2, 56, tw, targetCar ? 30 : 18);
@@ -2372,6 +2435,16 @@
         for (var i2 = 0; i2 < 5; i2++) circle(g, cx - 56 + i2 * 28, H * 0.28 + 17, 10, i2 < lit ? '#ff3030' : '#3a1515');
       }
       if (msg.t > 0 && state !== 'results') text(g, msg.text, cx, H / 2 - 30, 24, '#ffd93d', 'center');
+      if (radio) {
+        var rw = Math.min(W - 40, 430), rx = W / 2 - rw / 2, ry = H - 118;
+        g.globalAlpha = clamp(radio.t * 2, 0, 1);
+        panel(g, rx, ry, rw, 40);
+        if (!cache['face_' + radio.who] && R.CHARS[radio.who]) { var fc = document.createElement('canvas'); fc.width = fc.height = 48; R.drawPortrait(fc, R.CHARS[radio.who].face); cache['face_' + radio.who] = fc; }
+        if (cache['face_' + radio.who]) g.drawImage(cache['face_' + radio.who], rx + 4, ry + 4, 32, 32);
+        text(g, '📻 ' + radio.name, rx + 42, ry + 15, 9, radio.color);
+        text(g, radio.text.length > 34 ? radio.text.slice(0, 34) + '…' : radio.text, rx + 42, ry + 31, 11, '#ffffff');
+        g.globalAlpha = 1;
+      }
       popups.forEach(function (p, i) {
         g.globalAlpha = clamp(p.t, 0, 1);
         text(g, p.text, cx, H * 0.36 + i * 18 - (1.6 - p.t) * 10, 14, p.color, 'center');
@@ -2667,6 +2740,7 @@
         center(rows, mid, ' ' + lights, 'tr-lights');
       } else if (msg.t > 0 && state !== 'results') center(rows, mid, ' ' + msg.text + ' ', 'tr-msg');
       popups.forEach(function (p, pi) { center(rows, mid + 2 + pi, ' ' + p.text + ' ', 'tr-pop'); });
+      if (radio) center(rows, H - 6, ' 📻 ' + radio.name + '「' + radio.text + '」 ', 'tr-radio');
       if ((P.x < -1.05 || P.x > 1.05) && state === 'race' && !pSeg.tunnel) center(rows, H - 5, L(' コースアウト ', ' OFF ROAD '), 'tr-warn');
       if (sess.paused) center(rows, mid, L(' 一時停止 — p でつづける ', ' PAUSED — p to resume '), 'tr-msg');
       if (state === 'results' && result) textResults(rows);
@@ -2695,6 +2769,7 @@
 
     function statusLine(status) {
       var K = TB.Kit, parts2 = [];
+      if (mode === 'sp') parts2.push(['SP ', 'dim'], [K.bar(Math.max(0, spg.me), 100, 6) + ' ', 'accent bold'], ['vs ', 'dim'], [K.bar(Math.max(0, spg.foe), 100, 6) + '  ', 'err bold']);
       var hud = cfg.hud ? cfg.hud() : null;
       if (hud) { parts2.push([hud.title + '  ', 'warn bold']); hud.lines.forEach(function (ln) { parts2.push([ln.t + '  ', 'accent']); }); }
       if (mode === 'world') {
@@ -2773,8 +2848,8 @@
      ===================================================================== */
 
   /** コースの 1 コマを canvas に描く（選択画面の見本） */
-  R.drawPreview = function (cv, track, weather, mirror) {
-    var s = R.Session({ track: track, weather: weather || R.TRACKS[track].weather, mirror: mirror, demo: true, laps: Infinity, field: [] });
+  R.drawPreview = function (cv, track, weather, mirror, hideCar) {
+    var s = R.Session({ track: track, weather: weather || R.TRACKS[track].weather, mirror: mirror, demo: true, laps: Infinity, field: [], hideCar: hideCar });
     s.W = cv.width; s.H = cv.height;
     var g = cv.getContext('2d');
     s.update(0.016);

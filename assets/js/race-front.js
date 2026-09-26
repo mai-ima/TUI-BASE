@@ -56,6 +56,7 @@
     if (mode === 'arcade') { var e = estLap(o.track); cfg.timeLimit = Math.round(e * 0.6 + 6); cfg.cpBonus = Math.round(e / 3 * 1.1); cfg.traffic = o.traffic || 14; cfg.laps = o.laps || 3; }
     if (mode === 'chase') { cfg.timeLimit = 120; cfg.laps = Infinity; cfg.traffic = o.traffic !== undefined ? o.traffic : 10; }
     if (mode === 'traffic') { cfg.laps = Infinity; cfg.traffic = o.traffic || 18; }
+    if (mode === 'sp') { cfg.laps = Infinity; cfg.traffic = o.traffic !== undefined ? o.traffic : 10; }
     if (mode === 'coins') { cfg.laps = Infinity; cfg.timeLimit = 60; cfg.traffic = 0; }
     if (mode === 'elim') cfg.laps = cfg.field.length;
     return cfg;
@@ -87,7 +88,7 @@
 
   /* ---------- 物語 ---------- */
   function storyField(ev) {
-    if (ev.mode === 'duel' || ev.mode === 'chase' || ev.mode === 'touge') return [R.boss(ev.boss, ev.pace)];
+    if (ev.mode === 'duel' || ev.mode === 'chase' || ev.mode === 'touge' || ev.mode === 'sp') return [R.boss(ev.boss, ev.pace)];
     if (!ev.rivals) return [];
     var pool = ev.pool === 'gang' ? R.GANG : ev.pool === 'super' ? R.SUPERCARS : ev.pool === 'touge' ? R.TOUGE_DRIVERS : R.DRIVERS;
     var f = R.makeField(ev.rivals, ev.pace, pool);
@@ -95,7 +96,9 @@
     return f;
   }
   function storyCfg(ev) {
-    return baseCfg({ track: ev.track, mode: ev.mode, laps: ev.laps, field: storyField(ev), traffic: ev.traffic, carId: ev.car });
+    var c = baseCfg({ track: ev.track, mode: ev.mode, laps: ev.laps, field: storyField(ev), traffic: ev.traffic, carId: ev.car, weather: ev.weather });
+    c.radio = ev.radio || null;
+    return c;
   }
 
   function goalText(goal, track) {
@@ -124,7 +127,7 @@
   }
 
   /* ---------- 結果を記録して、見せる文章を作る ---------- */
-  var RACING = ['race', 'duel', 'elim', 'touge'];
+  var RACING = ['race', 'duel', 'elim', 'touge', 'sp'];
   function applyResult(ctx, r) {
     var s = R.load(), out = { title: '', sub: '', lines: [], success: null, money: 0, table: null };
     var mode = r.mode, trackId = typeof ctx.track === 'string' ? ctx.track : null;
@@ -147,6 +150,7 @@
     switch (mode) {
       case 'race': case 'duel': out.title = !fin ? L('リタイア', 'Retired') : r.place === 1 ? L('優勝！', 'VICTORY!') : L(r.place + ' 位でゴール', 'Finished P' + r.place); break;
       case 'touge': out.title = r.place === 1 ? L('峠バトル 勝利！', 'TOUGE WIN!') : L('峠バトル 敗北…', 'TOUGE LOSS...'); break;
+      case 'sp': out.title = r.place === 1 ? L('SP バトル 勝利！', 'SP BATTLE WON!') : L('SP バトル 敗北…', 'SP BATTLE LOST'); out.lines.push('SP ' + r.sp.me + ' vs ' + r.sp.foe); break;
       case 'elim': out.title = fin ? L('生き残った！', 'LAST ONE STANDING!') : L('脱落…', 'ELIMINATED'); break;
       case 'time': out.title = L('ベスト ', 'Best ') + fmt(r.best); break;
       case 'arcade': out.title = fin ? L('ゴール！', 'FINISH!') : L('タイムアップ', "TIME'S UP"); break;
@@ -176,6 +180,7 @@
       case 'challenge':
         if (mode === 'elim' && fin) money = 1200 * dm;
         if (mode === 'duel' && fin && r.place === 1) money = 1500 * dm;
+        if (mode === 'sp' && r.place === 1) money = 1800 * dm;
         if (mode === 'arcade' && fin) money = 1000 * dm;
         if (mode === 'chase' && r.caught) money = 1500;
         if (mode === 'traffic') money = r.score / 8;
@@ -760,7 +765,7 @@
         buttons: function (sum) {
           if (sum.success) return [{ label: L('次へ', 'Continue'), on: function () {
             var after = function () {
-              if (ev.id === '5b') { credits(); return; }
+              if (ev.id === 'f1') { credits(); return; }
               var nx = idx + 1;
               app.stack = app.stack.slice(0, 2);   // タイトル・ストーリー一覧まで戻す
               if (nx < R.STORY.length) { show(app.stack[1]); storyEvent(nx, true); } else show(app.stack[1]);
@@ -773,38 +778,126 @@
       });
     }
 
+    /* 会話シーン。背景・立ち絵（表情つき）・演出（揺れ・フラッシュ・集中線・擬音）・章タイトル・ナレーション・VS 画面 */
     function scene(lines, done) {
       over.classList.remove('hidden');
       over.innerHTML = '';
-      var box = el('div', 'rx-scene');
-      var face = el('canvas', 'rx-face'); face.width = 96; face.height = 96;
-      var right = el('div', 'rx-say');
-      var name = el('div', 'rx-name'), text = el('div', 'rx-text'), more = el('div', 'rx-more', '▼ Enter / クリック　s スキップ');
-      right.appendChild(name); right.appendChild(text); right.appendChild(more);
-      box.appendChild(face); box.appendChild(right);
-      over.appendChild(box);
-      var i = 0, shown = 0, timer = 0, full = '';
-      function showLine() {
-        if (i >= lines.length) { clearInterval(timer); app.keyHook = null; done(); return; }
-        var ln = lines[i], ch = R.CHARS[ln.who];
-        R.drawPortrait(face, ch.face);
-        name.textContent = t(ch.name); name.style.color = ch.color;
-        full = t(ln.text); shown = 0; text.textContent = '';
+      var root = el('div', 'rx-scn');
+      var bg = el('canvas', 'rx-scn-bg'); bg.width = 960; bg.height = 540;
+      var speed = el('canvas', 'rx-scn-speed'); speed.width = 960; speed.height = 540;
+      var faceL = el('canvas', 'rx-scn-face left'), faceR = el('canvas', 'rx-scn-face right');
+      faceL.width = faceL.height = faceR.width = faceR.height = 192;
+      var sfxEl = el('div', 'rx-scn-sfx'), flashEl = el('div', 'rx-scn-flash');
+      var box = el('div', 'rx-scn-box'), name = el('div', 'rx-name'), text = el('div', 'rx-text'), more = el('div', 'rx-more', '▼ Enter / クリック　s スキップ');
+      box.appendChild(name); box.appendChild(text); box.appendChild(more);
+      var card = el('div', 'rx-scn-card'), narr = el('div', 'rx-scn-narr'), vs = el('div', 'rx-scn-vs');
+      [bg, speed, faceL, faceR, el('div', 'rx-scn-bar top'), el('div', 'rx-scn-bar bottom'), sfxEl, box, narr, card, vs, flashEl].forEach(function (x) { root.appendChild(x); });
+      over.appendChild(root);
+
+      // 集中線
+      (function () {
+        var g3 = speed.getContext('2d'); g3.translate(480, 270);
+        for (var i = 0; i < 90; i++) {
+          var a = i / 90 * Math.PI * 2 + Math.random() * 0.05, r0 = 150 + Math.random() * 120, w = 0.004 + Math.random() * 0.01;
+          g3.fillStyle = 'rgba(255,255,255,' + (0.25 + Math.random() * 0.35) + ')';
+          g3.beginPath(); g3.moveTo(Math.cos(a) * r0, Math.sin(a) * r0);
+          g3.lineTo(Math.cos(a - w) * 700, Math.sin(a - w) * 700); g3.lineTo(Math.cos(a + w) * 700, Math.sin(a + w) * 700); g3.fill();
+        }
+      })();
+      function setBg(track, weather) {
+        try { R.drawPreview(bg, track, weather || null, false, true); } catch (e) { /* ignore */ }
+        root.classList.remove('pan'); void root.offsetWidth; root.classList.add('pan');
+      }
+      setBg('tenryu');
+
+      var i = 0, shown = 0, timer = 0, full = '', mode = 'line', autoT = 0;
+      function fxOf(str) {
+        var o = { list: (str || '').split(/\s+/), emo: null, sfx: null };
+        o.list.forEach(function (x) { if (x.indexOf('emo:') === 0) o.emo = x.slice(4); if (x.indexOf('sfx:') === 0) o.sfx = x.slice(4); });
+        o.has = function (k) { return o.list.indexOf(k) >= 0; };
+        return o;
+      }
+      function pulse(cls, ms) { root.classList.remove(cls); void root.offsetWidth; root.classList.add(cls); setTimeout(function () { root.classList.remove(cls); }, ms); }
+      function hideAll() { card.className = 'rx-scn-card'; narr.className = 'rx-scn-narr'; vs.className = 'rx-scn-vs'; box.classList.remove('hide'); }
+      function typeInto(elm, str, cb) {
+        full = str; shown = 0; elm.textContent = '';
         clearInterval(timer);
         timer = setInterval(function () {
-          shown += 2; text.textContent = full.slice(0, shown);
-          if (shown % 6 === 0) sfx('step');
-          if (shown >= full.length) clearInterval(timer);
-        }, 28);
+          shown += 1; elm.textContent = full.slice(0, shown);
+          if (shown % 3 === 0) sfx('step');
+          if (shown >= full.length) { clearInterval(timer); if (cb) cb(); }
+        }, 32);
+      }
+      function portrait(cvs, who, emo) {
+        var ch = R.CHARS[who] || R.CHARS.mina;
+        cvs.getContext('2d').clearRect(0, 0, 192, 192);
+        R.drawPortrait(cvs, ch.face, emo);
+      }
+      var onL = null, onR = null;
+      function showLine() {
+        clearInterval(timer); clearTimeout(autoT);
+        hideAll();
+        if (i >= lines.length) { app.keyHook = null; done(); return; }
+        var ln = lines[i];
+        if (ln.bg) { setBg(ln.bg, ln.weather); i++; showLine(); return; }
+        if (ln.title) {
+          mode = 'card'; box.classList.add('hide');
+          card.innerHTML = ''; card.appendChild(el('div', 'rx-card-t', ln.title)); card.appendChild(el('div', 'rx-card-s', ln.sub || ''));
+          card.className = 'rx-scn-card show'; sfx('lap');
+          autoT = setTimeout(adv, 2600);
+          return;
+        }
+        if (ln.narr) {
+          mode = 'narr'; box.classList.add('hide');
+          narr.className = 'rx-scn-narr show';
+          typeInto(narr, ln.narr);
+          return;
+        }
+        if (ln.vs) {
+          mode = 'vs'; box.classList.add('hide');
+          vs.innerHTML = '';
+          ln.vs.forEach(function (who, k) {
+            var side = el('div', 'rx-vs-side ' + (k ? 'r' : 'l'));
+            var c2 = el('canvas'); c2.width = c2.height = 192; portrait(c2, who, k ? 'angry' : 'cool');
+            side.appendChild(c2); side.appendChild(el('div', 'rx-vs-name', TB.t((R.CHARS[who] || {}).name || who)));
+            side.style.setProperty('--c', (R.CHARS[who] || {}).color || '#fff');
+            vs.appendChild(side);
+            if (!k) vs.appendChild(el('div', 'rx-vs-mark', 'VS'));
+          });
+          vs.className = 'rx-scn-vs show'; pulse('flash', 300); sfx('go');
+          autoT = setTimeout(adv, 2800);
+          return;
+        }
+        // せりふ
+        mode = 'line';
+        var who = ln[0], fx = fxOf(ln[2]), ch = R.CHARS[who] || { name: who, color: '#fff' };
+        var left = who === 'you' || (who === 'mina' && !fx.has('right'));
+        var cvs = left ? faceL : faceR;
+        if ((left ? onL : onR) !== who) { cvs.classList.remove('in'); void cvs.offsetWidth; cvs.classList.add('in'); }
+        if (left) onL = who; else onR = who;
+        portrait(cvs, who, fx.emo);
+        faceL.classList.toggle('dim', !left); faceR.classList.toggle('dim', left);
+        faceL.classList.toggle('empty', !onL); faceR.classList.toggle('empty', !onR);
+        cvs.classList.toggle('zoom', fx.has('zoom'));
+        name.textContent = TB.t(ch.name); name.style.color = ch.color;
+        box.style.setProperty('--c', ch.color);
+        speed.classList.toggle('on', fx.has('lines'));
+        if (fx.has('shake')) pulse('shake', 450);
+        if (fx.has('flash')) pulse('flash', 350);
+        if (fx.sfx) { sfxEl.textContent = fx.sfx; sfxEl.classList.remove('pop'); void sfxEl.offsetWidth; sfxEl.classList.add('pop'); sfx('hit'); }
+        else sfxEl.classList.remove('pop');
+        typeInto(text, TB.t(ln[1]));
       }
       function adv() {
-        if (shown < full.length) { shown = full.length; text.textContent = full; clearInterval(timer); return; }
+        if ((mode === 'line' || mode === 'narr') && shown < full.length) {
+          shown = full.length; (mode === 'narr' ? narr : text).textContent = full; clearInterval(timer); return;
+        }
         i++; showLine();
       }
-      box.addEventListener('click', adv);
+      root.addEventListener('click', adv);
       app.keyHook = function (k) {
         if (k === 'Enter' || k === ' ') adv();
-        else if (k === 's' || k === 'S' || k === 'Escape') { i = lines.length; clearInterval(timer); app.keyHook = null; done(); }
+        else if (k === 's' || k === 'S' || k === 'Escape') { i = lines.length; showLine(); }
         return true;
       };
       showLine();
@@ -1049,7 +1142,7 @@
 
     /* ---------- コースを選ぶ（タイムアタック・チャレンジ） ---------- */
     SCREENS.trackPick = function (mode, extra) {
-      var tracks = mode === 'time' ? R.ALL_TRACKS : loopTracks();
+      var tracks = mode === 'time' ? R.ALL_TRACKS : mode === 'sp' ? ['tomei', 'highway', 'desert', 'city', 'nagoya'] : loopTracks();
       return { build: function (o) {
         var s = R.load();
         var p = panel(t((R.MODES[mode] || R.CASUAL[mode]).name), t((R.MODES[mode] || R.CASUAL[mode]).desc || { ja: '', en: '' }));
@@ -1074,6 +1167,7 @@
           if (mode === 'elim') field = R.makeField(5, cp);
           if (mode === 'duel') field = [extra.boss ? R.boss(extra.boss, Math.max(cp, 0.9)) : { name: 'MONO', color: '#eee', body: 'formula', ai: 'technician', skill: 1, pace: cp }];
           if (mode === 'chase') field = [R.boss('phantom', 0.88)];
+          if (mode === 'sp') field = [R.boss(pick(['yoiyami', 'tekkamen', 'root', 'hayate2']), Math.max(cp, 0.9))];
           if (mode === 'party') field = R.makeField(7, cp);
           return baseCfg({ track: track, mode: mode === 'party' ? 'race' : mode, field: field, carId: mode === 'chase' ? 'police' : null, casual: mode === 'party' });
         },
@@ -1085,10 +1179,10 @@
       return { build: function (o) {
         var s = R.load();
         var p = panel(L('チャレンジ', 'Challenges'), '');
-        var items = ['elim', 'duel', 'arcade', 'chase', 'traffic'].map(function (m) {
+        var items = ['elim', 'duel', 'sp', 'arcade', 'chase', 'traffic'].map(function (m) {
           return item(t(R.MODES[m].name), t(R.MODES[m].desc), function () {
             if (m === 'duel') go(SCREENS.duel()); else go(SCREENS.trackPick(m));
-          }, { icon: { elim: '💀', duel: '⚔', arcade: '⏲', chase: '🚓', traffic: '🛣' }[m] });
+          }, { icon: { elim: '💀', duel: '⚔', sp: '🌙', arcade: '⏲', chase: '🚓', traffic: '🛣' }[m] });
         });
         items.push(item(L('戻る', 'Back'), '', back, { icon: '↩' }));
         p.appendChild(list(items));
@@ -1298,6 +1392,9 @@
       over.classList.remove('hidden'); over.innerHTML = '';
       var p = panel(sum.title, sum.sub);
       p.classList.add('rx-result');
+      var won = sum.success === true || (sum.success == null && r && r.place === 1 && r.reason !== 'eliminated' && r.reason !== 'timeout');
+      var lost = sum.success === false || (r && (r.reason === 'eliminated' || r.reason === 'timeout' || r.reason === 'wrecked'));
+      if (won || lost) { var st = el('div', 'rx-stamp ' + (won ? 'win' : 'lose'), won ? 'WIN' : 'LOSE'); over.appendChild(st); setTimeout(function () { st.remove(); }, 2600); if (won) sfx('win'); }
       if (sum.success !== null && sum.success !== undefined) p.appendChild(el('div', 'rx-big ' + (sum.success ? 'ok' : 'ng'), sum.success ? L('MISSION CLEAR', 'MISSION CLEAR') : L('MISSION FAILED', 'MISSION FAILED')));
       if (sum.table) {
         var tb = el('div', 'rx-table');
@@ -1548,7 +1645,20 @@
 
   /* ---------- 文字版の物語 ---------- */
   function sceneLines(lines) {
-    return lines.map(function (ln) { var ch = R.CHARS[ln.who]; return [{ t: '▌' + t(ch.name) + '  ', c: 'accent-2 bold' }, { t: t(ln.text) }]; });
+    var out2 = [];
+    lines.forEach(function (ln) {
+      if (ln.bg) return;
+      if (ln.title) { out2.push('', [{ t: '━━━ ' + ln.title + '　' + (ln.sub || '') + ' ━━━', c: 'accent bold' }], ''); return; }
+      if (ln.narr) { out2.push([{ t: '　' + ln.narr, c: 'dim' }]); return; }
+      if (ln.vs) { out2.push([{ t: '　【 ' + ln.vs.map(function (w) { return t((R.CHARS[w] || {}).name || w); }).join('  VS  ') + ' 】', c: 'err bold' }]); return; }
+      var who = ln.who || ln[0], txt = ln.text || ln[1], fx = ln[2] || '';
+      var ch = R.CHARS[who] || { name: who };
+      var sf = (fx.match(/sfx:(\S+)/) || [])[1];
+      var row = [{ t: '▌' + t(ch.name) + '  ', c: 'accent-2 bold' }, { t: t(txt), c: /shake/.test(fx) ? 'warn bold' : '' }];
+      if (sf) row.push({ t: '  ' + sf, c: 'err bold' });
+      out2.push(row);
+    });
+    return out2;
   }
   function tuiStory(id) {
     var s = R.load();
@@ -1581,7 +1691,7 @@
         if (!sum) return;
         if (sum.success) {
           if (ev.post) out(sceneLines(ev.post).concat(['']));
-          if (ev.id === '5b') out([[{ t: 'THE END — Thank you for playing.', c: 'accent bold' }], [{ t: L('番外編が開放されました: ', 'Extra chapter unlocked: '), c: 'dim' }, link('race story', 'race story')], '']);
+          if (ev.id === 'f1') out([[{ t: 'THE END — Thank you for playing.', c: 'accent bold' }], [{ t: L('番外編が開放されました: ', 'Extra chapter unlocked: '), c: 'dim' }, link('race story', 'race story')], '']);
           out([[{ t: L('Enter で次の話へ / q でやめる', 'Enter for the next episode / q to stop'), c: 'dim' }]]);
           ask('story>', function (v2) { if (v2 !== 'q') tuiStory(); });
         } else {
