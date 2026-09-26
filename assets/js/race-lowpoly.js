@@ -94,3 +94,58 @@
     return g;
   };
 })();
+
+/* ---------- 高品質のリアル車両（外部モデル） ---------- */
+(function () {
+  'use strict';
+  var TB = window.TB, R = TB.Race;
+  var REAL = [
+    ['rc_concept', 'concept', 'コンセプト GT（高品質モデル）', 'Concept GT (high-detail)', 'super', 'v12', [9, 9, 9, 6, 8], 60000,
+     '約 18 万ポリゴンの高精細モデル。内装・ホイール・ブレーキまで作り込まれている。（3D モデル: Khronos glTF Sample Assets "Car Concept"、CC-BY 4.0）']
+  ];
+  REAL.forEach(function (x) {
+    var base = R.BODIES[x[4]], b = {}; for (var k in base) b[k] = base[k]; b.real = x[1]; R.BODIES[x[0]] = b;
+    if (R.BODY_PROFILE) R.BODY_PROFILE[x[0]] = x[5];
+    if (!R.CARS.some(function (c) { return c.id === x[0]; })) R.CARS.push({ id: x[0], name: { ja: x[2], en: x[3] }, cls: 'S', price: x[7], body: x[0], paint: 1, real: true,
+      stats: { spd: x[6][0], acc: x[6][1], grp: x[6][2], arm: x[6][3], nit: x[6][4] }, desc: { ja: x[8], en: 'High-detail external model (Khronos "Car Concept", CC-BY 4.0).' } });
+  });
+  R.REALCARS = REAL.map(function (x) { return x[0]; });
+
+  /** 必要ならリアル車両のデータを読み込む（数 MB あるので使うときだけ） */
+  R.loadRealCar = function (body, cb) {
+    var B = R.BODIES[body];
+    if (!B || !B.real || (TB.RaceRealCars && TB.RaceRealCars[B.real])) { cb(); return; }
+    var sc = document.createElement('script');
+    sc.src = 'assets/vendor/real-' + B.real + '.js';
+    sc.onload = sc.onerror = function () { cb(); };
+    document.head.appendChild(sc);
+  };
+  var cache = {};
+  function dec(b64, Tp) { var bin = atob(b64), u8 = new Uint8Array(bin.length); for (var i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i); return new Tp(u8.buffer); }
+  R.realModel = function (body, color) {
+    var B = R.BODIES[body], D = B && TB.RaceRealCars && TB.RaceRealCars[B.real];
+    if (!D) return null;
+    var T = THREE;
+    if (!cache[B.real]) {
+      var geos = {}, headZ = 0, headN = 0;
+      Object.keys(D.groups).forEach(function (k) {
+        var G = D.groups[k], P = dec(G.p, Int16Array), N = dec(G.n, Int8Array), I = dec(G.i, G.i32 ? Uint32Array : Uint16Array);
+        var pos = new Float32Array(P.length), nor = new Float32Array(N.length);
+        for (var i = 0; i < P.length; i++) { pos[i] = P[i] / 1000; nor[i] = N[i] / 127; }
+        if (k === 'head') for (i = 2; i < pos.length; i += 3) { headZ += pos[i]; headN++; }
+        var g = new T.BufferGeometry(); g.setAttribute('position', new T.BufferAttribute(pos, 3)); g.setAttribute('normal', new T.BufferAttribute(nor, 3)); g.setIndex(new T.BufferAttribute(I, 1));
+        g.userData.keep = true; geos[k] = g;
+      });
+      cache[B.real] = { geos: geos, flip: headN && headZ / headN < 0 };
+    }
+    var C = cache[B.real], root = new T.Group(), g = new T.Group();
+    var M = { paint: R.carMat('paint', color), glass: R.carMat('glass'), head: R.carMat('head'), tail: R.carMat('tail'), amber: R.carMat('amber'), tire: R.carMat('tire'),
+              rim: R.carMat('rim'), chrome: R.carMat('chrome'), interior: R.carMat('x', '#2a2624'), dark: R.carMat('trim') };
+    Object.keys(C.geos).forEach(function (k) { var m = new T.Mesh(C.geos[k], M[k] || M.dark); m.castShadow = k !== 'glass'; m.receiveShadow = true; g.add(m); });
+    if (C.flip) g.rotation.y = Math.PI;
+    root.add(g);
+    var sh = new T.Mesh(new T.PlaneGeometry(2.1, 4.5), new T.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.3, depthWrite: false }));
+    sh.rotation.x = -Math.PI / 2; sh.position.y = 0.02; root.add(sh);
+    return root;
+  };
+})();

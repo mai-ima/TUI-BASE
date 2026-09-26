@@ -1,0 +1,6 @@
+real-concept.js — "Car Concept" (Khronos glTF Sample Assets)
+  元モデル: Unity Fan "Free Concept Car 004"（Sketchfab, CC0 パブリックドメイン）
+  glTF 化・最適化: Khronos Group — Creative Commons Attribution 4.0 International (CC-BY-4.0)
+  https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/CarConcept
+Khronos のロゴ・商標は含まない（ロゴ入りテクスチャ・ナンバープレート・エンブレムは除外）。
+変更点: 形状のみを材質ごとにまとめて整数に量子化。

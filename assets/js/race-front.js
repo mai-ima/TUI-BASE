@@ -1437,8 +1437,19 @@
           }
           detail.appendChild(acts);
         }
-        var selIdx = 0;
-        R.CARS.forEach(function (car, i) {
+        var selIdx = 0, fi = 0;
+        // グループ分け: 通常 / ストーリー / ローポリ / 高品質リアル
+        var GROUPS = [
+          [L('通常の車両', 'Standard'), function (c) { return !c.lowpoly && !c.real && !c.era; }],
+          [L('ストーリーの車両', 'Story cars'), function (c) { return !!c.era; }],
+          [L('ローポリ', 'Low-poly'), function (c) { return !!c.lowpoly; }],
+          [L('高品質リアル（外部モデル）', 'High-detail (external models)'), function (c) { return !!c.real; }]
+        ];
+        var ordered = [];
+        GROUPS.forEach(function (gp) { var cs = R.CARS.filter(gp[1]); if (cs.length) ordered.push({ head: gp[0] }); ordered = ordered.concat(cs); });
+        ordered.forEach(function (car) {
+          if (car.head) { lst.appendChild(el('div', 'rx-sec', car.head)); return; }
+          var i = fi++;
           var own = R.ownedCar(s, car.id), locked = R.carLocked(s, car);
           if (car.id === garageSel) selIdx = i;
           lst.appendChild(item((s.car === car.id ? '▶ ' : '') + t(car.name), '[' + car.cls + '] ' + (own ? L('所有', 'owned') : locked ? L('未開放', 'locked') : yen(car.price)),
@@ -1535,6 +1546,8 @@
       if (!R.can3D()) { detach3D(); return; }
       R.load3D(function (ok) {
         if (!ok || !app.sess || app.closed) return;
+        var bodyNow = app.sess.cfg.car && app.sess.cfg.car.body;
+        if (R.BODIES[bodyNow] && R.BODIES[bodyNow].real && !(TB.RaceRealCars && TB.RaceRealCars[R.BODIES[bodyNow].real])) { R.loadRealCar(bodyNow, function () { attach3D(); }); return; }
         if (!cv3) { cv3 = el('canvas', 'rx-canvas rx-canvas3d'); stage.insertBefore(cv3, cv); }
         cv3.width = cv.width; cv3.height = cv.height;
         cv3.style.filter = (app.sess.cfg && app.sess.cfg.filter) || '';

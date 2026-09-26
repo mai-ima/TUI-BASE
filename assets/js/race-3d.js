@@ -531,6 +531,7 @@
     var T = THREE, key = body + color;
     var B = (R.BODIES && R.BODIES[body]) || { h: 0.56, body: 0.64 };
     if (carCache[key]) return carCache[key].clone();
+    if (B.real && R.realModel) { var rm = R.realModel(body, color); if (rm) { carCache[key] = rm; return rm.clone(); } }
     if (B.lowpoly && R.lowPolyModel) { var lp = R.lowPolyModel(body, color); if (lp) { carCache[key] = lp; return lp.clone(); } }
     var g = new T.Group();
     var mdl = MODEL[body];
