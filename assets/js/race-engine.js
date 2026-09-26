@@ -2010,6 +2010,28 @@
       if (!demo) drawHud(g);
     }
 
+    /** 3D 表示のとき、透明な 2D キャンバスに重ねて描くもの（天気・効果・HUD） */
+    function renderHud(g) {
+      useGeom();
+      W = sess.W; H = sess.H;
+      g.clearRect(0, 0, W, H);
+      parts.forEach(function (p) {
+        g.globalAlpha = clamp(p.life / p.max, 0, 1) * 0.8;
+        g.fillStyle = p.color;
+        g.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+      });
+      g.globalAlpha = 1;
+      drawWeather(g);
+      if (P.boosting || P.padT > 0) speedLines(g);
+      if (flash > 0) { g.fillStyle = 'rgba(255,255,255,' + (flash * 2) + ')'; g.fillRect(0, 0, W, H); }
+      if (!cache.vig2) {
+        cache.vig2 = g.createRadialGradient(W / 2, H * 0.55, Math.min(W, H) * 0.4, W / 2, H * 0.55, Math.max(W, H) * 0.8);
+        cache.vig2.addColorStop(0, 'rgba(0,0,0,0)'); cache.vig2.addColorStop(1, 'rgba(0,0,0,.3)');
+      }
+      g.fillStyle = cache.vig2; g.fillRect(0, 0, W, H);
+      if (!demo) drawHud(g);
+    }
+
     function drawSky(g) {
       if (!cache.sky) {
         cache.sky = g.createLinearGradient(0, 0, 0, H * 0.62);
@@ -2819,6 +2841,13 @@
     sess.audio = function () { return eng.info(); };
     sess.render = render;
     sess.renderText = renderText;
+    sess.renderHud = renderHud;
+    /* 3D 描画が読むための情報（参照を渡すだけ。書き換えない） */
+    sess.view = function () {
+      return { P: P, pz: pz(), playerZ: PLAYER_Z, cars: racers(), traffic: traffic, cops: cops, keys: keys, t: t0, state: state,
+               car: car, spec: spec, pal: pal, weather: weather, night: night, geom: geom, trackLen: trackLen, segs: segs,
+               cross: spec.crossSeg ? sig.cross : [], crossSeg: spec.crossSeg, signal: sig.phase, dyn: dyn };
+    };
     sess.keys = keys;
     sess.state = function () { return state; };
     sess.result = function () { return result; };

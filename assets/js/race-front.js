@@ -528,7 +528,8 @@
       last = now;
       if (app.sess) {
         if (!app.paused) for (var st = 0; st < (R.speedup || 1) && app.sess; st++) app.sess.update(dt);
-        app.sess.render(g);
+        if (app.r3d && app.r3dSess === app.sess) { try { app.r3d.render(); } catch (e) { console.error(e); detach3D(); } app.sess.renderHud(g); }
+        else app.sess.render(g);
       } else if (app.demo) {
         app.demo.update(dt); app.demo.render(g);
         app.demoT += dt;
@@ -544,6 +545,7 @@
       if (app.mode === 'race' && app.sess) {
         if (k === 'Escape' || k === 'p' || k === 'P') { pause(); return; }
         if (k === 'm' || k === 'M') { toTui(); return; }
+        if (k === 'v' || k === 'V') { R.edit(function (s) { s.r3d = !s.r3d; }); if (R.load().r3d) attach3D(); else detach3D(); return; }
         app.sess.key(k, true);
         return;
       }
@@ -1336,9 +1338,12 @@
         p.appendChild(optRow(L('難易度（標準）', 'Default level'), function () { return t(R.LEVEL_NAMES[R.load().level]); }, function (d) {
           R.edit(function (s) { var ks = ['easy', 'normal', 'hard']; s.level = ks[(ks.indexOf(s.level) + d + 3) % 3]; });
         }));
+        p.appendChild(optRow(L('描画', 'Renderer'), function () { return R.load().r3d ? L('3D（WebGL・試験版）', '3D (WebGL, beta)') : L('疑似 3D（標準）', 'Pseudo-3D (default)'); },
+          function () { R.edit(function (s) { s.r3d = !s.r3d; }); }));
         p.appendChild(optRow(L('効果音', 'Sound'), function () { return TB.store.get('sound', '1') === '1' ? 'ON' : 'OFF'; }, function () { TB.Sfx.set(TB.store.get('sound', '1') !== '1'); }));
         var help = el('div', 'rx-help');
         [L('←→ ハンドル　↑ アクセル　↓ ブレーキ　スペース ニトロ（ゼロヨンではシフトアップ）', '←→ steer  ↑ gas  ↓ brake  space nitro (shift up in drag)'),
+         L('v レース中に 3D 表示（WebGL）と疑似 3D を切り替え', 'v toggles 3D (WebGL) / pseudo-3D during a race'),
          L('p / Esc 一時停止　m 文字版（TUI）と GUI の切り替え　r（止まって）オープンワールドで U ターン', 'p / Esc pause  m switch text/GUI  r (stopped) U-turn in open world'),
          L('前の車の真後ろにつくとスリップストリームで加速し、ニトロも溜まります。', 'Draft right behind a car to gain speed and refill nitro.'),
          L('峠はガードレールで囲まれています。こすると減速。後追いから始まり、150m 引き離せば即勝利。', 'Passes have guardrails. Touge starts from behind; 150m gap wins instantly.'),
@@ -1365,6 +1370,31 @@
       app.sess = R.Session(cfg);
       app.sess.W = cv.width; app.sess.H = cv.height;
       padBox.innerHTML = ''; padBox.appendChild(R.makePad(function () { return app.sess; }));
+      if (R.load().r3d) attach3D(); else detach3D();
+    }
+
+    /* --- 3D 表示（WebGL） --- */
+    var cv3 = null;
+    function attach3D() {
+      if (!app.sess) return;
+      if (!R.can3D()) { detach3D(); return; }
+      R.load3D(function (ok) {
+        if (!ok || !app.sess || app.closed) return;
+        if (!cv3) { cv3 = el('canvas', 'rx-canvas rx-canvas3d'); stage.insertBefore(cv3, cv); }
+        cv3.width = cv.width; cv3.height = cv.height;
+        try {
+          if (!app.r3d) app.r3d = R.Render3D(cv3, app.sess); else app.r3d.rebuild(app.sess);
+          app.r3d.resize(cv.width, cv.height);
+          app.r3dSess = app.sess;
+          cv.classList.add('overlay');
+        } catch (e) { console.error(e); detach3D(); }
+      });
+    }
+    function detach3D() {
+      if (app.r3d) { try { app.r3d.dispose(); } catch (e) { /* ignore */ } }
+      app.r3d = null; app.r3dSess = null;
+      if (cv3) { cv3.remove(); cv3 = null; }
+      cv.classList.remove('overlay');
     }
     function prep(cfg, opts) {
       cfg.onFinish = function (r) {
@@ -1382,6 +1412,7 @@
           app.sess = R.Session(nx);
           app.sess.W = cv.width; app.sess.H = cv.height;
           for (var k in keys) app.sess.keys[k] = keys[k];
+          if (app.r3d) { try { app.r3d.rebuild(app.sess); app.r3dSess = app.sess; } catch (e) { detach3D(); } }
         }, 0);
       };
     }
@@ -1417,6 +1448,7 @@
       app.sel = 0; highlight();
     }
     function toMenu() {
+      detach3D();
       if (app.sess) app.sess.stop();
       app.sess = null; app.mode = 'menu'; padBox.innerHTML = ''; app.paused = false;
       startDemo();
@@ -1443,6 +1475,7 @@
     }
     function resume() { app.paused = false; if (app.sess) app.sess.paused = false; app.keyHook = null; over.innerHTML = ''; over.classList.add('hidden'); app.mode = 'race'; }
     function worldEnd(w) {
+      detach3D();
       if (app.sess) app.sess.stop();
       app.sess = null; app.mode = 'menu'; app.paused = false; padBox.innerHTML = '';
       startDemo();
@@ -1460,6 +1493,7 @@
       TB.submit('race tui ' + cmd);
     }
     function cleanup() {
+      detach3D();
       app.closed = true;
       cancelAnimationFrame(raf);
       if (app.sess) app.sess.stop();

@@ -1142,3 +1142,6 @@ body.ui-tui .st-ui { color: var(--bg); background: var(--accent); border-color: 
 .rx-stamp.win { color: #ffd93d; } .rx-stamp.lose { color: #9aa5b1; }
 @keyframes rxStamp { 0% { transform: translate(-50%, -50%) scale(5) rotate(-18deg); opacity: 0; } 12% { transform: translate(-50%, -50%) scale(.9) rotate(-8deg); opacity: 1; }
   20% { transform: translate(-50%, -50%) scale(1.05) rotate(-8deg); } 75% { opacity: 1; } 100% { transform: translate(-50%, -60%) scale(1) rotate(-8deg); opacity: 0; } }
+.rx-canvas3d { image-rendering: auto; }
+.rx-canvas.overlay { background: transparent; z-index: 1; }
+.rx-over { z-index: 2; }
