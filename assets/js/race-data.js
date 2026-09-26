@@ -844,48 +844,140 @@
      地点（node）を道（road）でつなぐ。道の終わりの分岐で、車線の位置で行き先を選ぶ。
      ===================================================================== */
 
+  /*
+   * 地点。x・y はおおよその km（東が +x、南が +y、浜松駅が原点）。
+   * 実際の位置関係に合わせているが、道の長さはゲーム用に縮めている。
+   * kind: signal（信号のある交差点）/ ic（インターチェンジ）/ jct / town（信号のない分岐）
+   */
   R.NODES = {
-    hm_eki: { name: { ja: '浜松駅前', en: 'Hamamatsu Sta.' }, city: 'hm', mark: 'acttower', x: 0.2, y: 0.6 },
-    hm_castle: { name: { ja: '浜松城公園', en: 'Hamamatsu Castle' }, city: 'hm', mark: 'castle', x: 0.15, y: 0.5 },
-    hm_dune: { name: { ja: '中田島砂丘', en: 'Nakatajima Dunes' }, city: 'hm', mark: 'dune', x: 0.2, y: 0.8 },
-    hm_lake: { name: { ja: '浜名湖・舘山寺', en: 'Lake Hamana' }, city: 'hm', mark: 'ferris', x: 0.04, y: 0.62 },
-    hm_tenryu: { name: { ja: '天竜の山里', en: 'Tenryu Hills' }, city: 'hm', mark: 'tea', x: 0.22, y: 0.25 },
-    hm_ic: { name: { ja: '浜松 IC', en: 'Hamamatsu IC' }, city: 'hm', mark: 'tollgate', x: 0.3, y: 0.55 },
-    ng_ic: { name: { ja: '名古屋 IC', en: 'Nagoya IC' }, city: 'ng', mark: 'tollgate', x: 0.8, y: 0.4 },
-    ng_meieki: { name: { ja: '名古屋駅', en: 'Nagoya Sta.' }, city: 'ng', mark: 'twintower', x: 0.86, y: 0.35 },
-    ng_sakae: { name: { ja: '栄', en: 'Sakae' }, city: 'ng', mark: 'tvtower', x: 0.93, y: 0.38 },
-    ng_castle: { name: { ja: '名古屋城', en: 'Nagoya Castle' }, city: 'ng', mark: 'castle', x: 0.9, y: 0.22 },
-    ng_port: { name: { ja: '名古屋港', en: 'Nagoya Port' }, city: 'ng', mark: 'ferris', x: 0.88, y: 0.6 }
+    hm_eki: { name: { ja: '浜松駅', en: 'Hamamatsu Sta.' }, x: 0, y: 0, kind: 'signal', mark: 'acttower', area: 'hm' },
+    hm_kaji: { name: { ja: '鍛冶町（中心街）', en: 'Kajimachi' }, x: -0.3, y: -0.9, kind: 'signal', mark: 'piano', area: 'hm' },
+    hm_castle: { name: { ja: '浜松城', en: 'Hamamatsu Castle' }, x: -1.2, y: -1.4, kind: 'signal', mark: 'castle', area: 'hm' },
+    hm_takatsuka: { name: { ja: '高塚', en: 'Takatsuka' }, x: -5, y: 1.5, kind: 'signal', mark: 'factory', area: 'hm' },
+    hm_sanaru: { name: { ja: '佐鳴湖', en: 'Lake Sanaru' }, x: -4.5, y: -1.2, kind: 'signal', mark: 'bush', area: 'hm' },
+    hm_dune: { name: { ja: '中田島砂丘', en: 'Nakatajima Dunes' }, x: 0.5, y: 4.5, kind: 'town', mark: 'kite', area: 'hm' },
+    hm_shinohara: { name: { ja: '篠原（国道 1 号）', en: 'Shinohara (Rt.1)' }, x: -8, y: 3, kind: 'signal', mark: 'gyoza', area: 'hm' },
+    hm_maisaka: { name: { ja: '舞阪', en: 'Maisaka' }, x: -12.5, y: 2, kind: 'signal', mark: 'pine', area: 'hm' },
+    hm_benten: { name: { ja: '弁天島', en: 'Bentenjima' }, x: -14.5, y: 2, kind: 'town', mark: 'bigtorii', area: 'hm' },
+    hm_arai: { name: { ja: '新居（湖西）', en: 'Arai' }, x: -18.5, y: 2.5, kind: 'signal', mark: 'sign', area: 'hm' },
+    hm_yuto: { name: { ja: '雄踏', en: 'Yuto' }, x: -10.5, y: -0.5, kind: 'signal', mark: 'house', area: 'hm' },
+    hm_nishi_ic: { name: { ja: '浜松西 IC', en: 'Hamamatsu-nishi IC' }, x: -8, y: -3.5, kind: 'ic', mark: 'tollgate', area: 'hm' },
+    hm_kanzanji: { name: { ja: '舘山寺温泉', en: 'Kanzanji Onsen' }, x: -13, y: -7, kind: 'town', mark: 'ferris', area: 'hm' },
+    hm_mikatahara: { name: { ja: '三方原', en: 'Mikatahara' }, x: -2.5, y: -9, kind: 'signal', mark: 'tea', area: 'hm' },
+    hm_kiga: { name: { ja: '気賀（細江）', en: 'Kiga' }, x: -12, y: -14, kind: 'signal', mark: 'station', area: 'hm' },
+    hm_mikkabi: { name: { ja: '三ヶ日', en: 'Mikkabi' }, x: -21, y: -16, kind: 'signal', mark: 'mikan', area: 'hm' },
+    hm_mikkabi_ic: { name: { ja: '三ヶ日 IC・浜名湖 SA', en: 'Mikkabi IC / Hamanako SA' }, x: -18, y: -11, kind: 'ic', mark: 'tollgate', area: 'hm' },
+    hm_hamakita: { name: { ja: '浜北', en: 'Hamakita' }, x: 4, y: -13, kind: 'signal', mark: 'station', area: 'hm' },
+    hm_kasai: { name: { ja: '笠井', en: 'Kasai' }, x: 7.5, y: -7, kind: 'signal', mark: 'factory', area: 'hm' },
+    hm_ic: { name: { ja: '浜松 IC', en: 'Hamamatsu IC' }, x: 6, y: -2.5, kind: 'ic', mark: 'tollgate', area: 'hm' },
+    hm_hamakita_ic: { name: { ja: '浜松浜北 IC', en: 'Hamamatsu-hamakita IC' }, x: 3, y: -17.5, kind: 'ic', mark: 'tollgate', area: 'hm' },
+    hm_inasa: { name: { ja: '浜松いなさ JCT', en: 'Inasa JCT' }, x: -9, y: -20, kind: 'jct', mark: 'greensign', area: 'hm' },
+    hm_futamata: { name: { ja: '天竜二俣', en: 'Futamata' }, x: 6.5, y: -20, kind: 'signal', mark: 'station', area: 'hm' },
+    hm_haruno: { name: { ja: '春野', en: 'Haruno' }, x: 9, y: -32, kind: 'town', mark: 'cedar', area: 'hm' },
+    hm_misakubo: { name: { ja: '水窪', en: 'Misakubo' }, x: 16, y: -48, kind: 'town', mark: 'cedar', area: 'hm' },
+    toyokawa_ic: { name: { ja: '豊川 IC', en: 'Toyokawa IC' }, x: 30, y: -6, kind: 'ic', mark: 'tollgate', area: 'mid' },
+    shinshiro_ic: { name: { ja: '新城 IC', en: 'Shinshiro IC' }, x: 28, y: -22, kind: 'ic', mark: 'tollgate', area: 'mid' },
+    okazaki_ic: { name: { ja: '岡崎 IC', en: 'Okazaki IC' }, x: 46, y: -12, kind: 'ic', mark: 'tollgate', area: 'mid' },
+    toyota_jct: { name: { ja: '豊田東 JCT', en: 'Toyota-higashi JCT' }, x: 52, y: -20, kind: 'jct', mark: 'greensign', area: 'mid' },
+    kariya: { name: { ja: '刈谷（伊勢湾岸）', en: 'Kariya' }, x: 56, y: -4, kind: 'ic', mark: 'greensign', area: 'mid' },
+    ng_ic: { name: { ja: '名古屋 IC', en: 'Nagoya IC' }, x: 64, y: -14, kind: 'ic', mark: 'tollgate', area: 'ng' },
+    ng_meieki: { name: { ja: '名古屋駅', en: 'Nagoya Sta.' }, x: 68, y: -11, kind: 'signal', mark: 'twintower', area: 'ng' },
+    ng_sakae: { name: { ja: '栄', en: 'Sakae' }, x: 70.5, y: -11, kind: 'signal', mark: 'tvtower', area: 'ng' },
+    ng_osu: { name: { ja: '大須', en: 'Osu' }, x: 69.5, y: -9.5, kind: 'signal', mark: 'billboard', area: 'ng' },
+    ng_castle: { name: { ja: '名古屋城', en: 'Nagoya Castle' }, x: 69.5, y: -13.5, kind: 'signal', mark: 'castle', area: 'ng' },
+    ng_atsuta: { name: { ja: '熱田神宮', en: 'Atsuta Shrine' }, x: 69, y: -6, kind: 'signal', mark: 'torii', area: 'ng' },
+    ng_port: { name: { ja: '名古屋港', en: 'Nagoya Port' }, x: 68, y: -1, kind: 'signal', mark: 'ferris', area: 'ng' }
   };
-  // theme: 景色 / len: 長さ（区間）/ kind: city・lake・dune・mount・hwy・hwymount・port・park
+  // 地図（0〜1）に直した座標を付けておく
+  (function () {
+    var ks = Object.keys(R.NODES), minx = Infinity, maxx = -Infinity, miny = Infinity, maxy = -Infinity;
+    // 地図では、浜松と名古屋のあいだ（高速道路の区間）を縮めて描く
+    function warp(x) { return x <= 20 ? x : x < 60 ? 20 + (x - 20) * 0.25 : 30 + (x - 60) * 1.2; }
+    ks.forEach(function (k) { var n = R.NODES[k]; n.kx = n.x; n.x = warp(n.x); });
+    ks.forEach(function (k) { var n = R.NODES[k]; minx = Math.min(minx, n.x); maxx = Math.max(maxx, n.x); miny = Math.min(miny, n.y); maxy = Math.max(maxy, n.y); });
+    ks.forEach(function (k) { var n = R.NODES[k]; n.ky = n.y; n.x = (n.x - minx) / (maxx - minx); n.y = (n.ky - miny) / (maxy - miny); });
+  })();
+
+  /*
+   * 道。kind は景色と制限速度を決める。line は並走する鉄道（遠州鉄道＝赤い電車、天浜線）。
+   */
   R.ROADS = [
-    { a: 'hm_eki', b: 'hm_castle', name: { ja: '鍛冶町通り', en: 'Kajimachi Ave.' }, kind: 'city', len: 700 },
-    { a: 'hm_eki', b: 'hm_dune', name: { ja: '南へ向かう大通り', en: 'South Boulevard' }, kind: 'dune', len: 900 },
-    { a: 'hm_castle', b: 'hm_lake', name: { ja: '佐鳴湖の湖畔道', en: 'Sanaru Lakeside' }, kind: 'lake', len: 1000 },
-    { a: 'hm_dune', b: 'hm_lake', name: { ja: '弁天島の海沿い', en: 'Bentenjima Coast' }, kind: 'lake', len: 1100 },
-    { a: 'hm_castle', b: 'hm_tenryu', name: { ja: '北へ向かう茶畑の道', en: 'Tea Field Road' }, kind: 'mount', len: 1200 },
-    { a: 'hm_eki', b: 'hm_ic', name: { ja: '浜松バイパス', en: 'Hamamatsu Bypass' }, kind: 'city', len: 800 },
-    { a: 'hm_ic', b: 'ng_ic', name: { ja: '東名高速', en: 'Tomei Expressway' }, kind: 'hwy', len: 2600, traffic: 12 },
-    { a: 'hm_tenryu', b: 'ng_ic', name: { ja: '新東名高速', en: 'Shin-Tomei Expwy' }, kind: 'hwymount', len: 2400, traffic: 8 },
-    { a: 'hm_lake', b: 'ng_port', name: { ja: '伊勢湾岸の道', en: 'Isewangan Route' }, kind: 'hwy', len: 2400, traffic: 10 },
-    { a: 'ng_ic', b: 'ng_meieki', name: { ja: '都市高速', en: 'Urban Expressway' }, kind: 'ngcity', len: 800, traffic: 6 },
-    { a: 'ng_meieki', b: 'ng_sakae', name: { ja: '広小路通', en: 'Hirokoji Ave.' }, kind: 'ngcity', len: 600, traffic: 5 },
-    { a: 'ng_sakae', b: 'ng_castle', name: { ja: '大津通', en: 'Otsu Ave.' }, kind: 'park', len: 700 },
-    { a: 'ng_meieki', b: 'ng_castle', name: { ja: '堀川沿い', en: 'Horikawa River' }, kind: 'park', len: 800 },
-    { a: 'ng_sakae', b: 'ng_port', name: { ja: '港へ向かう道', en: 'Road to the Port' }, kind: 'port', len: 1000, traffic: 5 },
-    { a: 'ng_meieki', b: 'ng_port', name: { ja: 'あおなみ線沿い', en: 'Aonami Line Road' }, kind: 'port', len: 1000, traffic: 4 }
+    { a: 'hm_eki', b: 'hm_kaji', name: { ja: '鍛冶町通り', en: 'Kajimachi-dori' }, kind: 'city', km: 1 },
+    { a: 'hm_kaji', b: 'hm_castle', name: { ja: '市役所前の通り', en: 'City Hall Ave.' }, kind: 'city', km: 1.2 },
+    { a: 'hm_eki', b: 'hm_takatsuka', name: { ja: '国道 257 号（南へ）', en: 'Route 257 South' }, kind: 'suburb', km: 5 },
+    { a: 'hm_castle', b: 'hm_sanaru', name: { ja: '佐鳴台への坂', en: 'Road to Sanarudai' }, kind: 'suburb', km: 3.5 },
+    { a: 'hm_eki', b: 'hm_dune', name: { ja: '国道 257 号・凧場通り', en: 'Kite Festival Road' }, kind: 'coast', km: 4.5 },
+    { a: 'hm_takatsuka', b: 'hm_shinohara', name: { ja: '国道 1 号（西へ）', en: 'Route 1 West' }, kind: 'suburb', km: 3.5, traffic: 7 },
+    { a: 'hm_dune', b: 'hm_shinohara', name: { ja: '遠州灘の海沿い', en: 'Enshunada Coast Rd' }, kind: 'coast', km: 9 },
+    { a: 'hm_shinohara', b: 'hm_maisaka', name: { ja: '浜名バイパス', en: 'Hamana Bypass' }, kind: 'coast', km: 4.5, traffic: 6, limit: 80 },
+    { a: 'hm_maisaka', b: 'hm_benten', name: { ja: '浜名湖の橋', en: 'Lake Hamana Bridge' }, kind: 'bridge', km: 2 },
+    { a: 'hm_benten', b: 'hm_arai', name: { ja: '中浜名橋・新居へ', en: 'To Arai' }, kind: 'bridge', km: 3.5 },
+    { a: 'hm_sanaru', b: 'hm_yuto', name: { ja: '雄踏街道', en: 'Yuto Kaido' }, kind: 'suburb', km: 6 },
+    { a: 'hm_yuto', b: 'hm_maisaka', name: { ja: '舞阪への道', en: 'To Maisaka' }, kind: 'suburb', km: 3 },
+    { a: 'hm_sanaru', b: 'hm_nishi_ic', name: { ja: '入野の坂道', en: 'Irino Hill' }, kind: 'suburb', km: 4 },
+    { a: 'hm_nishi_ic', b: 'hm_kanzanji', name: { ja: '舘山寺街道', en: 'Kanzanji Kaido' }, kind: 'lake', km: 6.5 },
+    { a: 'hm_kanzanji', b: 'hm_kiga', name: { ja: '奥浜名湖の湖岸', en: 'Oku-Hamanako Shore' }, kind: 'lake', km: 9 },
+    { a: 'hm_kiga', b: 'hm_mikkabi', name: { ja: '国道 362 号・みかん街道', en: 'Mikan Road (Rt.362)' }, kind: 'mikan', km: 10, line: 'tenhama' },
+    { a: 'hm_mikkabi', b: 'hm_mikkabi_ic', name: { ja: '三ヶ日 IC 線', en: 'Mikkabi IC Road' }, kind: 'mikan', km: 4 },
+    { a: 'hm_castle', b: 'hm_mikatahara', name: { ja: '国道 257 号（姫街道）', en: 'Hime-kaido (Rt.257)' }, kind: 'plateau', km: 8, traffic: 5 },
+    { a: 'hm_mikatahara', b: 'hm_kiga', name: { ja: '三方原台地の一本道', en: 'Mikatahara Plateau Rd' }, kind: 'plateau', km: 10 },
+    { a: 'hm_kaji', b: 'hm_hamakita', name: { ja: '国道 152 号（遠州鉄道沿い）', en: 'Rt.152 by the Enshu Railway' }, kind: 'suburb', km: 12, line: 'entetsu', traffic: 6 },
+    { a: 'hm_mikatahara', b: 'hm_hamakita', name: { ja: '台地を東へ', en: 'Across the Plateau' }, kind: 'plateau', km: 7 },
+    { a: 'hm_hamakita', b: 'hm_futamata', name: { ja: '国道 152 号（天竜へ）', en: 'Rt.152 to Tenryu' }, kind: 'river', km: 8, line: 'entetsu' },
+    { a: 'hm_futamata', b: 'hm_haruno', name: { ja: '天竜川沿いの山道', en: 'Tenryu Riverside Pass' }, kind: 'mount', km: 12 },
+    { a: 'hm_haruno', b: 'hm_misakubo', name: { ja: '国道 152 号（水窪へ・酷道）', en: 'Rt.152 to Misakubo' }, kind: 'mount', km: 18 },
+    { a: 'hm_eki', b: 'hm_kasai', name: { ja: '笠井街道', en: 'Kasai Kaido' }, kind: 'suburb', km: 8 },
+    { a: 'hm_kasai', b: 'hm_hamakita', name: { ja: '天竜川の堤防道', en: 'Tenryu Levee Rd' }, kind: 'river', km: 7 },
+    { a: 'hm_eki', b: 'hm_ic', name: { ja: '国道 152 号（浜松 IC へ）', en: 'Rt.152 to Hamamatsu IC' }, kind: 'suburb', km: 6, traffic: 7 },
+    { a: 'hm_kasai', b: 'hm_ic', name: { ja: '有玉の道', en: 'Aritama Rd' }, kind: 'suburb', km: 5 },
+    { a: 'hm_hamakita', b: 'hm_hamakita_ic', name: { ja: '新東名への取付道路', en: 'Shin-Tomei Access' }, kind: 'plateau', km: 5 },
+    // 高速道路
+    { a: 'hm_nishi_ic', b: 'hm_mikkabi_ic', name: { ja: '東名高速（浜名湖越え）', en: 'Tomei over Lake Hamana' }, kind: 'hwy', km: 14, traffic: 10, limit: 100 },
+    { a: 'hm_nishi_ic', b: 'hm_ic', name: { ja: '東名高速（浜松市内）', en: 'Tomei through Hamamatsu' }, kind: 'hwy', km: 14, traffic: 10, limit: 100 },
+    { a: 'hm_mikkabi_ic', b: 'toyokawa_ic', name: { ja: '東名高速（豊川へ）', en: 'Tomei to Toyokawa' }, kind: 'hwy', km: 30, traffic: 10, limit: 100 },
+    { a: 'toyokawa_ic', b: 'okazaki_ic', name: { ja: '東名高速（岡崎へ）', en: 'Tomei to Okazaki' }, kind: 'hwy', km: 22, traffic: 10, limit: 100 },
+    { a: 'okazaki_ic', b: 'ng_ic', name: { ja: '東名高速（名古屋へ）', en: 'Tomei to Nagoya' }, kind: 'hwy', km: 25, traffic: 12, limit: 100 },
+    { a: 'hm_inasa', b: 'hm_hamakita_ic', name: { ja: '新東名高速（浜松 SA）', en: 'Shin-Tomei (Hamamatsu SA)' }, kind: 'hwymount', km: 12, traffic: 7, limit: 120 },
+    { a: 'hm_inasa', b: 'hm_mikkabi_ic', name: { ja: '三遠南信道・連絡路', en: 'Inasa Link' }, kind: 'hwymount', km: 8, traffic: 4, limit: 80 },
+    { a: 'hm_inasa', b: 'shinshiro_ic', name: { ja: '新東名高速（新城へ）', en: 'Shin-Tomei to Shinshiro' }, kind: 'hwymount', km: 20, traffic: 6, limit: 120 },
+    { a: 'shinshiro_ic', b: 'toyota_jct', name: { ja: '新東名高速（豊田へ）', en: 'Shin-Tomei to Toyota' }, kind: 'hwymount', km: 30, traffic: 7, limit: 120 },
+    { a: 'toyota_jct', b: 'ng_ic', name: { ja: '東海環状・名古屋へ', en: 'To Nagoya IC' }, kind: 'hwy', km: 14, traffic: 9, limit: 100 },
+    { a: 'toyota_jct', b: 'kariya', name: { ja: '伊勢湾岸道（豊田から）', en: 'Isewangan from Toyota' }, kind: 'hwy', km: 16, traffic: 9, limit: 100 },
+    { a: 'kariya', b: 'ng_port', name: { ja: '伊勢湾岸道（名港トリトン）', en: 'Isewangan (Meiko Triton)' }, kind: 'bridge', km: 14, traffic: 8, limit: 100 },
+    // 名古屋
+    { a: 'ng_ic', b: 'ng_meieki', name: { ja: '名古屋高速', en: 'Nagoya Expressway' }, kind: 'ngcity', km: 7, traffic: 8, limit: 60 },
+    { a: 'ng_ic', b: 'ng_castle', name: { ja: '出来町通', en: 'Dekimachi-dori' }, kind: 'ngcity', km: 7, traffic: 6 },
+    { a: 'ng_meieki', b: 'ng_sakae', name: { ja: '広小路通', en: 'Hirokoji-dori' }, kind: 'ngcity', km: 2.5, traffic: 6 },
+    { a: 'ng_meieki', b: 'ng_castle', name: { ja: '堀川沿い', en: 'Along the Horikawa' }, kind: 'park', km: 3 },
+    { a: 'ng_sakae', b: 'ng_castle', name: { ja: '大津通（北へ）', en: 'Otsu-dori North' }, kind: 'park', km: 2.5 },
+    { a: 'ng_sakae', b: 'ng_osu', name: { ja: '大津通（南へ）', en: 'Otsu-dori South' }, kind: 'ngcity', km: 1.5, traffic: 6 },
+    { a: 'ng_meieki', b: 'ng_osu', name: { ja: '伏見通', en: 'Fushimi-dori' }, kind: 'ngcity', km: 2.5, traffic: 6 },
+    { a: 'ng_osu', b: 'ng_atsuta', name: { ja: '国道 19 号・熱田へ', en: 'To Atsuta' }, kind: 'ngcity', km: 3.5, traffic: 6 },
+    { a: 'ng_atsuta', b: 'ng_port', name: { ja: '江川線・港へ', en: 'To the Port' }, kind: 'port', km: 6, traffic: 5 },
+    { a: 'ng_atsuta', b: 'kariya', name: { ja: '国道 1 号（東へ）', en: 'Route 1 East' }, kind: 'suburb', km: 12, traffic: 8 }
   ];
+  R.ROADS.forEach(function (r) {
+    var hw = r.kind === 'hwy' || r.kind === 'hwymount' || (r.kind === 'bridge' && r.limit >= 100);
+    r.len = Math.round(Math.max(480, Math.min(hw ? 4200 : 2800, r.km * (hw ? 150 : 260))));
+  });
+
   R.ROAD_KINDS = {
-    city: { pal: PAL.hmcity, deco: ['building', 'lamp', 'building', 'unagi', 'piano'], traffic: 5 },
-    dune: { pal: PAL.hmdune, deco: ['dune', 'kite', 'bush', 'dune'], water: 'right' },
-    lake: { pal: PAL.hmlake, deco: ['pine', 'unagi', 'bush', 'pine', 'palm'], water: 'left' },
-    mount: { pal: PAL.hmmount, deco: ['tea', 'pine', 'tea', 'tree', 'rock'] },
-    hwy: { pal: PAL.hwy, deco: ['soundwall', 'greensign', 'soundwall', 'lamp'], highway: true },
-    hwymount: { pal: PAL.hwymount, deco: ['pine', 'soundwall', 'greensign', 'pine'], highway: true, tunnels: true },
-    ngcity: { pal: PAL.ngcity, deco: ['building', 'lamp', 'billboard', 'building'], night: true, skyline: true },
-    port: { pal: PAL.ngport, deco: ['container', 'crane', 'lamp', 'container'], water: 'right' },
-    park: { pal: PAL.ngpark, deco: ['tree', 'bush', 'lamp', 'tree'] }
+    city: { pal: PAL.hmcity, deco: ['building', 'lamp', 'building', 'unagi', 'gyoza', 'building', 'piano', 'house'], traffic: 6, limit: 50, police: 1, signals: true },
+    suburb: { pal: PAL.hmcity, deco: ['house', 'lamp', 'factory', 'house', 'gyoza', 'unagi', 'house', 'bush'], traffic: 5, limit: 60, police: 1 },
+    plateau: { pal: PAL.hmmount, deco: ['tea', 'tea', 'house', 'tree', 'tea', 'factory'], traffic: 3, limit: 60, police: 1 },
+    coast: { pal: PAL.hmdune, deco: ['pine', 'dune', 'pine', 'kite', 'bush'], water: 'right', traffic: 3, limit: 60 },
+    lake: { pal: PAL.hmlake, deco: ['pine', 'unagi', 'house', 'pine', 'palm', 'bush'], water: 'left', traffic: 3, limit: 50, police: 1 },
+    bridge: { pal: PAL.hmlake, deco: ['lamp', 'barrier', 'lamp'], water: 'both', traffic: 4, limit: 60 },
+    mikan: { pal: PAL.hmmount, deco: ['mikan', 'mikan', 'house', 'mikan', 'tree'], water: 'left', traffic: 2, limit: 50 },
+    river: { pal: PAL.hmmount, deco: ['tree', 'house', 'pine', 'tree'], water: 'right', traffic: 3, limit: 60, police: 1 },
+    mount: { pal: PAL.hmmount, deco: ['cedar', 'cedar', 'rock', 'cedar', 'sign'], water: 'right', traffic: 1, limit: 40, rails: true },
+    hwy: { pal: PAL.hwy, deco: ['soundwall', 'greensign', 'soundwall', 'lamp'], highway: true, traffic: 9, limit: 100, police: 1 },
+    hwymount: { pal: PAL.hwymount, deco: ['cedar', 'soundwall', 'greensign', 'cedar'], highway: true, tunnels: true, traffic: 6, limit: 120, rails: true, police: 1 },
+    ngcity: { pal: PAL.ngcity, deco: ['building', 'lamp', 'billboard', 'building', 'building'], night: true, skyline: true, traffic: 6, limit: 50, police: 2, signals: true },
+    port: { pal: PAL.ngport, deco: ['container', 'crane', 'lamp', 'container'], water: 'right', traffic: 4, limit: 50, police: 1 },
+    park: { pal: PAL.ngpark, deco: ['tree', 'bush', 'lamp', 'tree', 'building'], traffic: 4, limit: 50, police: 1 }
   };
+
   R.neighbors = function (node) {
     return R.ROADS.filter(function (r) { return r.a === node || r.b === node; })
       .map(function (r) { return { road: r, to: r.a === node ? r.b : r.a }; });

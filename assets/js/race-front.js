@@ -257,23 +257,27 @@
   function hash(str) { var h = 7; for (var i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) % 2147483647; return h || 1; }
   function srand(seed) { var s = seed; return function () { s = s * 16807 % 2147483647; return (s - 1) / 2147483646; }; }
 
-  function worldBuild(b, road, seed) {
+  function worldBuild(b, road, seed, turn) {
     var r = srand(seed), kind = road.kind;
     function sg() { return r() < 0.5 ? -1 : 1; }
     function n(a, bb) { return Math.round(a + r() * (bb - a)); }
+    if (turn) b.road(4, 10, 6, turn * 9, 0);   // 交差点を曲がる
     b.straight(20);
     var guard = 0;
     while (b.segs.length < road.len - 160 && guard++ < 200) {
       var x = r();
       switch (kind) {
-        case 'city': case 'ngcity':
+        case 'city': case 'ngcity': case 'suburb': case 'park':
           if (x < 0.35) b.straight(n(10, 25));
           else if (x < 0.8) b.curve(n(14, 24), sg() * (4 + r() * 3), 0);
           else if (kind === 'ngcity' && x < 0.9) b.tunnel(function () { b.straight(30); });
           else b.hill(15, sg() * 8);
           break;
         case 'dune': if (x < 0.5) b.straight(n(20, 45)); else b.curve(n(25, 40), sg() * (2 + r() * 2), sg() * 10); break;
-        case 'lake': if (x < 0.3) b.straight(20); else b.curve(n(25, 45), sg() * (2 + r() * 3), 0); break;
+        case 'lake': case 'mikan': case 'coast': if (x < 0.3) b.straight(20); else b.curve(n(25, 45), sg() * (2 + r() * 3), kind === 'mikan' ? sg() * 8 : 0); break;
+        case 'plateau': if (x < 0.6) b.straight(n(30, 60)); else b.curve(n(25, 40), sg() * (1.5 + r() * 2), sg() * 4); break;
+        case 'river': if (x < 0.4) b.straight(n(20, 40)); else b.curve(n(25, 40), sg() * (2 + r() * 3), sg() * 6); break;
+        case 'bridge': if (x < 0.7) b.straight(n(30, 60)); else b.curve(n(40, 60), sg() * (1 + r()), sg() * 10); break;
         case 'mount': if (x < 0.35) b.hill(25, sg() * (20 + r() * 20)); else if (x < 0.8) b.curve(n(20, 35), sg() * (4 + r() * 3), sg() * 15); else b.sCurves(4); break;
         case 'hwy': if (x < 0.55) b.straight(n(40, 80)); else b.curve(n(50, 80), sg() * (1.2 + r() * 1.5), sg() * 8); break;
         case 'hwymount':
@@ -308,15 +312,21 @@
       if (nm.length === 2) return ['← ' + nm[0], nm[1] + ' →'];
       return ['← ' + nm[0], '↑ ' + nm[1], nm[2] + ' →'];
     }
+    var turn = 0;
     function spec() {
-      var kind = R.ROAD_KINDS[road.kind], rev = road.a !== from;
-      var water = kind.water ? (rev ? (kind.water === 'left' ? 'right' : 'left') : kind.water) : null;
+      var kind = R.ROAD_KINDS[road.kind], rev = road.a !== from, nd = R.NODES[to];
+      var water = kind.water && kind.water !== 'both' ? (rev ? (kind.water === 'left' ? 'right' : 'left') : kind.water) : kind.water || null;
+      var hw = !!kind.highway || (road.kind === 'bridge' && (road.limit || 0) >= 100);
+      var tn = turn;
       return {
         id: 'w-' + road.a + '-' + road.b + (rev ? '-r' : ''), name: road.name, pal: kind.pal, deco: kind.deco, weather: 'clear',
-        night: !!kind.night, skyline: !!kind.skyline, water: water, noFinish: true, rails: road.kind === 'mount' || road.kind === 'hwymount',
-        banner: t(road.name) + '  →  ' + t(R.NODES[to].name), fork: labels(exits),
-        startMark: R.NODES[from].mark, endMark: R.NODES[to].mark,
-        build: function (b) { worldBuild(b, road, hash(road.a + road.b + (rev ? 'r' : ''))); }
+        night: !!kind.night, skyline: !!kind.skyline, water: water, noFinish: true, rails: !!kind.rails,
+        banner: t(road.name) + '  →  ' + t(nd.name), fork: labels(exits),
+        startMark: R.NODES[from].mark, endMark: nd.mark,
+        twoWay: !hw, narrow: !hw, limit: road.limit || kind.limit, police: kind.police || 0, orbis: hw,
+        junction: nd.kind === 'signal' || nd.kind === 'town' ? { signal: nd.kind === 'signal' } : null,
+        train: road.line || null,
+        build: function (b) { worldBuild(b, road, hash(road.a + road.b + (rev ? 'r' : '')), tn); }
       };
     }
     function cfgFor(start) {
@@ -326,10 +336,28 @@
         track: spec(), mode: 'world', laps: Infinity, weather: 'clear', field: [],
         traffic: road.traffic !== undefined ? road.traffic : (R.ROAD_KINDS[road.kind].traffic || 2),
         car: playerCar(s, carId), levelMul: 1, exits: exits.length, start: start,
-        hud: hud, onTick: tick, drawMap: drawMap
+        hud: hud, onTick: tick, drawMap: drawMap,
+        onViolation: violation, onBusted: busted, onEscape: escaped
       };
     }
     function go(a, b, rd) { from = a; to = b; road = rd; }
+
+    /* --- 違反・警察 --- */
+    w.fines = 0; w.violations = 0;
+    function fine(n, why) {
+      var paid = R.edit(function (s) { var p2 = Math.min(s.money, n); s.money -= p2; return p2; });
+      w.fines += paid; w.earned -= paid;
+      w.flash = { text: why + L('　反則金 -', '  fine -') + yen(paid), t: 4.5 };
+    }
+    function violation(kind, seen, over) {
+      w.violations++;
+      if (w.order) w.order.bad = (w.order.bad || 0) + 1;
+      if (kind === 'orbis') { fine(9000 + Math.round((over || 0) * 300), L('📸 オービス（' + Math.round(over) + 'km/h 超過）', '📸 Speed camera (' + Math.round(over) + ' over)')); return; }
+      var why = { signal: L('信号無視', 'Red light'), speed: L('速度違反', 'Speeding'), accident: L('事故', 'Accident'), copHit: L('パトカーに衝突', 'Hit a police car') }[kind];
+      if (!seen) w.flash = { text: why + L('（見られていない…）', ' (unseen...)'), t: 3 };
+    }
+    function busted() { fine(15000, L('🚨 確保された', '🚨 Busted')); }
+    function escaped() { w.flash = { text: L('🚨 警察を振り切った！', '🚨 Lost the police!'), t: 4 }; }
 
     function newOrder(at) {
       var nodes = Object.keys(R.NODES).filter(function (n) { return n !== at; });
@@ -352,7 +380,7 @@
       if (w.order && node === w.order.dest) {
         var o = w.order, late = o.left <= 0;
         var base = o.fare * (late ? 0.5 : 1), tip = late ? 0 : o.fare * 0.5 * (o.left / o.time);
-        var pen = Math.max(0, w.damage - o.dmg0) * o.fare * (o.fragile ? 1.2 : 0.5);
+        var pen = Math.max(0, w.damage - o.dmg0) * o.fare * (o.fragile ? 1.2 : 0.5) + (o.bad || 0) * o.fare * 0.25;
         var pay = Math.max(50, Math.round((base + tip - pen) / 10) * 10);
         w.earned += pay; w.trips++;
         R.edit(function (s) {
@@ -388,7 +416,7 @@
         lines.push({ t: (o.left > 0 ? L('残り ', 'Time ') + Math.ceil(o.left) + L(' 秒', 's') : L('遅刻中', 'LATE')) + L('　報酬 ', '  pay ') + yen(o.fare), c: o.left < 15 ? '#ff8a80' : '#e8e8f0' });
         lines.push({ t: nav(), c: '#5ccfa0' });
       } else {
-        lines.push({ t: '→ ' + t(R.NODES[to].name) });
+        lines.push({ t: '→ ' + t(R.NODES[to].name) + '　' + ({ signal: L('（信号交差点）', '(signalised)'), ic: 'IC', jct: 'JCT', town: '' }[R.NODES[to].kind] || '') });
         lines.push({ t: L('分岐: ', 'Fork: ') + labels(exits).join('  '), c: '#9fe8c8' });
       }
       if (w.flash) lines.push({ t: w.flash.text, c: '#ffd93d' });
@@ -424,19 +452,24 @@
     };
     w.next = function (carry) {
       if (carry.reverse) {
+        turn = 0;
         go(to, from, road);
         return cfgFor({ speed: 0, x: carry.x, nitro: carry.nitro, damage: carry.damage, frac: 1 - carry.frac });
       }
       var fixed = arrive(to);
-      var ex = exits[carry.choice] || exits[0];
+      var ci = Math.min(carry.choice || 0, exits.length - 1), ex = exits[ci] || exits[0];
+      turn = exits.length === 1 ? 0 : exits.length === 2 ? (ci === 0 ? -1 : 1) : ci - 1;
       go(to, ex.to, ex.road);
-      return cfgFor({ speed: carry.speed, x: carry.x, nitro: carry.nitro, damage: fixed ? 0 : carry.damage, total: 0 });
+      var cfg2 = cfgFor({ speed: carry.speed, x: carry.x, nitro: carry.nitro, damage: fixed ? 0 : carry.damage, total: 0, copGap: carry.copGap });
+      turn = 0;
+      return cfg2;
     };
     w.summary = function () {
       var out = [];
       if (w.job) out.push(L('完了 ', 'Jobs done ') + w.trips + L(' 件　稼ぎ ', '  earned ') + yen(w.earned));
       else out.push(L('訪れた場所 ', 'Places visited ') + w.visited.map(function (n) { return t(R.NODES[n].name); }).join('・'));
       if (!w.job && w.earned) out.push(L('初訪問ボーナス +', 'First-visit bonus +') + yen(w.earned));
+      if (w.violations) out.push(L('違反 ', 'Violations ') + w.violations + L(' 回　反則金 ', '  fines ') + yen(w.fines));
       out.push(L('走行時間 ', 'Drive time ') + fmt(w.clock * 1000));
       return out;
     };
@@ -796,30 +829,49 @@
         var p = panel(job ? R.JOBS[job].icon + ' ' + t(R.JOBS[job].name) : L('オープンワールド', 'Open World'),
                       job ? t(R.JOBS[job].desc) : L('浜松市〜東名・新東名〜名古屋市を自由に走る', 'Roam from Hamamatsu via the expressways to Nagoya'));
         var row = el('div', 'rx-row');
-        var mc = el('canvas', 'rx-map'); mc.width = 520; mc.height = 320;
+        var mc = el('canvas', 'rx-map'); mc.width = 900; mc.height = 560;
         function drawBig() {
-          var g2 = mc.getContext('2d');
-          g2.fillStyle = '#0b1522'; g2.fillRect(0, 0, mc.width, mc.height);
-          g2.fillStyle = 'rgba(47,127,193,.35)'; g2.fillRect(0, mc.height * 0.72, mc.width, mc.height * 0.28);
-          g2.font = 'bold 13px sans-serif'; g2.fillStyle = 'rgba(255,255,255,.25)';
-          g2.fillText(L('浜松市', 'Hamamatsu'), 40, 40); g2.fillText(L('名古屋市', 'Nagoya'), mc.width - 110, 40); g2.fillText(L('遠州灘・伊勢湾', 'Pacific coast'), mc.width / 2 - 50, mc.height - 16);
-          function P(n) { var N = R.NODES[n]; return [20 + N.x * (mc.width - 40), 20 + N.y * (mc.height - 40)]; }
+          var g2 = mc.getContext('2d'), Wm = mc.width, Hm = mc.height;
+          function P(n) { var N = R.NODES[n]; return [30 + N.x * (Wm - 60), 26 + N.y * (Hm - 52)]; }
+          g2.fillStyle = '#1b2a1f'; g2.fillRect(0, 0, Wm, Hm);
+          // 山地（北）・台地・海・浜名湖
+          var gr = g2.createLinearGradient(0, 0, 0, Hm); gr.addColorStop(0, '#2e3b2a'); gr.addColorStop(0.55, '#243427'); gr.addColorStop(1, '#1d2b22');
+          g2.fillStyle = gr; g2.fillRect(0, 0, Wm, Hm);
+          g2.fillStyle = '#1f4f7a'; g2.fillRect(0, Hm * 0.965, Wm, Hm * 0.035);
+          var a1 = P('hm_kanzanji'), a2 = P('hm_benten'), a3 = P('hm_kiga');
+          g2.fillStyle = '#23608f'; g2.beginPath(); g2.ellipse((a1[0] + a2[0]) / 2 - 6, (a3[1] + a2[1]) / 2, 20, (a2[1] - a3[1]) / 2 + 4, 0, 0, Math.PI * 2); g2.fill();
+          var p1 = P('hm_kasai'), p2 = P('hm_futamata');
+          g2.strokeStyle = '#2f79b3'; g2.lineWidth = 3; g2.beginPath(); g2.moveTo(p2[0] + 8, 0); g2.lineTo(p2[0] + 4, p2[1]); g2.lineTo(p1[0] + 10, p1[1]); g2.lineTo(p1[0] + 16, Hm); g2.stroke();
+          var ng = P('ng_port'); g2.fillStyle = '#1f4f7a'; g2.fillRect(ng[0] - 40, ng[1] + 6, 120, Hm);
+          g2.font = 'bold 15px sans-serif'; g2.fillStyle = 'rgba(255,255,255,.28)';
+          g2.fillText(L('浜松市', 'Hamamatsu'), P('hm_eki')[0] - 20, P('hm_eki')[1] + 42);
+          g2.fillText(L('名古屋市', 'Nagoya'), P('ng_meieki')[0] - 30, P('ng_castle')[1] - 22);
+          g2.fillText(L('浜名湖', 'Lake Hamana'), a1[0] - 70, a1[1] + 18);
+          g2.fillText(L('天竜川', 'Tenryu R.'), p2[0] + 12, p2[1] - 40);
+          g2.fillText(L('遠州灘', 'Enshu-nada'), P('hm_dune')[0] - 20, Hm - 6);
           R.ROADS.forEach(function (r) {
             var a = P(r.a), b = P(r.b), hw = r.kind === 'hwy' || r.kind === 'hwymount';
-            g2.strokeStyle = hw ? '#4dd0e1' : '#8a9aab'; g2.lineWidth = hw ? 3 : 1.5;
+            g2.strokeStyle = hw ? '#4dd0e1' : r.kind === 'mount' ? '#a1887f' : '#cfd8dc'; g2.lineWidth = hw ? 3.5 : 1.8;
             g2.beginPath(); g2.moveTo(a[0], a[1]); g2.lineTo(b[0], b[1]); g2.stroke();
-            if (hw) { g2.fillStyle = '#4dd0e1'; g2.font = '11px sans-serif'; g2.fillText(t(r.name), (a[0] + b[0]) / 2 - 24, (a[1] + b[1]) / 2 - 5); }
+            if (r.line) { g2.setLineDash([4, 4]); g2.strokeStyle = r.line === 'entetsu' ? '#ef5350' : '#fff'; g2.lineWidth = 1; g2.beginPath(); g2.moveTo(a[0] + 4, a[1]); g2.lineTo(b[0] + 4, b[1]); g2.stroke(); g2.setLineDash([]); }
           });
           Object.keys(R.NODES).forEach(function (n) {
-            var p2 = P(n), on = n === start;
-            g2.fillStyle = on ? '#5ccfa0' : '#eceff1'; g2.beginPath(); g2.arc(p2[0], p2[1], on ? 7 : 4, 0, Math.PI * 2); g2.fill();
-            g2.fillStyle = on ? '#5ccfa0' : '#cfd8dc'; g2.font = (on ? 'bold ' : '') + '11px sans-serif'; g2.fillText(t(R.NODES[n].name), p2[0] + 8, p2[1] + 4);
+            var p3 = P(n), on = n === start, N = R.NODES[n];
+            g2.fillStyle = on ? '#5ccfa0' : N.kind === 'ic' || N.kind === 'jct' ? '#4dd0e1' : '#eceff1';
+            g2.beginPath(); g2.arc(p3[0], p3[1], on ? 7 : 4, 0, Math.PI * 2); g2.fill();
+            g2.font = (on ? 'bold 13px' : '11px') + ' sans-serif';
+            var nm = t(N.name), tw = g2.measureText(nm).width;
+            g2.fillStyle = 'rgba(0,0,0,.55)'; g2.fillRect(p3[0] + 6, p3[1] - 7, tw + 4, 14);
+            g2.fillStyle = on ? '#5ccfa0' : '#e0e6ec'; g2.fillText(nm, p3[0] + 8, p3[1] + 4);
           });
+          g2.font = '11px sans-serif'; g2.fillStyle = '#4dd0e1'; g2.fillText(L('━ 高速道路', '━ Expressway'), 12, Hm - 26);
+          g2.fillStyle = '#ef5350'; g2.fillText(L('┅ 遠州鉄道', '┅ Enshu Railway'), 110, Hm - 26);
+          g2.fillStyle = '#ddd'; g2.fillText(L('┅ 天竜浜名湖鉄道', '┅ Tenhama Line'), 220, Hm - 26);
         }
         drawBig();
         mc.addEventListener('click', function (e) {
           var r = mc.getBoundingClientRect(), mx = (e.clientX - r.left) / r.width * mc.width, my = (e.clientY - r.top) / r.height * mc.height;
-          Object.keys(R.NODES).forEach(function (n) { var N = R.NODES[n], px = 20 + N.x * (mc.width - 40), py = 20 + N.y * (mc.height - 40); if (Math.hypot(px - mx, py - my) < 14) { start = n; drawBig(); } });
+          Object.keys(R.NODES).forEach(function (n) { var N = R.NODES[n], px = 30 + N.x * (mc.width - 60), py = 26 + N.y * (mc.height - 52); if (Math.hypot(px - mx, py - my) < 12) { start = n; drawBig(); } });
         });
         row.appendChild(mc);
         var info = el('div', 'rx-info');

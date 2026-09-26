@@ -222,4 +222,21 @@
       }
     };
   };
+  /** パトカーのサイレン（ウーーー）。level(0..1) で近さ */
+  R.sirenAudio = function () {
+    if (!TB.Sfx || !TB.Sfx.enabled() || !TB.Sfx.ctx) return null;
+    var ac = TB.Sfx.ctx(); if (!ac) return null;
+    try {
+      var o = ac.createOscillator(), f = ac.createBiquadFilter(), g = ac.createGain(), lfo = ac.createOscillator(), lg = ac.createGain();
+      o.type = 'sawtooth'; o.frequency.value = 760; f.type = 'lowpass'; f.frequency.value = 1800; g.gain.value = 0;
+      lfo.type = 'sine'; lfo.frequency.value = 0.32; lg.gain.value = 330;
+      lfo.connect(lg); lg.connect(o.frequency); o.connect(f); f.connect(g); g.connect(ac.destination);
+      o.start(); lfo.start();
+      var V = TB.Sfx.volume() * 0.9, done = false;
+      return {
+        level: function (v) { if (!done) g.gain.setTargetAtTime(V * v, ac.currentTime, 0.2); },
+        stop: function () { if (done) return; done = true; g.gain.setTargetAtTime(0, ac.currentTime, 0.1); try { o.stop(ac.currentTime + 0.5); lfo.stop(ac.currentTime + 0.5); } catch (e) { /* ignore */ } }
+      };
+    } catch (e) { return null; }
+  };
 })();

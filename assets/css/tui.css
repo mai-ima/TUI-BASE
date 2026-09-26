@@ -1069,3 +1069,13 @@ body.ui-tui .st-ui { color: var(--bg); background: var(--accent); border-color: 
 .tr-banner { color: #fff; background: #0d47a1; font-weight: bold; }
 .tr-maple1 { color: #d84315; background: var(--tr-grass-b); }
 .tr-maple2 { color: #f9a825; background: var(--tr-grass-b); }
+.tr-cw { background: var(--tr-road-a); color: #e8e8e8; }
+.tr-house { color: #eceff1; background: var(--tr-grass-b); }
+.tr-gyoza { color: #fff; background: #c62828; }
+.tr-mikan { color: #ff9800; background: var(--tr-grass-b); }
+.tr-orbis { color: #ff5252; background: var(--tr-sky2); }
+.tr-limit { color: #1a47a0; background: #fff; font-weight: bold; }
+.tr-sig-g { color: #00e0a0; background: #2b2f36; }
+.tr-sig-y { color: #ffc400; background: #2b2f36; }
+.tr-sig-r { color: #ff2a2a; background: #2b2f36; }
+.rx-row > .rx-map { flex: 3 1 560px; }
