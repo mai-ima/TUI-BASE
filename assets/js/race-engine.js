@@ -1060,6 +1060,12 @@
       case 'cap': px(5, 3, 14, 3, '#1a2f5a'); px(4, 5, 16, 1, '#10203d'); px(11, 3, 2, 2, '#ffd54f'); px(6, 6, 2, 3, hair); px(16, 6, 2, 3, hair); break;
       case 'hood': px(4, 2, 16, 4, hair); px(3, 4, 3, 16, hair); px(18, 4, 3, 16, hair); break;
       case 'bald': px(6, 4, 12, 2, shade(f.skin, 1.08)); break;
+      case 'short': px(6, 3, 12, 3, hair); px(5, 5, 1, 3, hair); px(18, 5, 1, 3, hair); break;
+      case 'ponytail': px(5, 3, 14, 3, hair); px(5, 5, 2, 5, hair); px(17, 5, 2, 5, hair); px(19, 6, 3, 2, hair); px(20, 8, 2, 7, hair); break;
+      case 'pompadour': px(5, 1, 14, 2, hair); px(4, 2, 5, 2, hair); px(6, 3, 12, 3, hair); px(5, 5, 1, 4, hair); px(18, 5, 1, 4, hair); break;
+      case 'bun': px(6, 3, 12, 3, hair); px(9, 0, 6, 3, hair); px(5, 5, 2, 4, hair); px(17, 5, 2, 4, hair); break;
+      case 'wavy': px(5, 3, 14, 3, hair); for (i = 0; i < 7; i++) px(4 + (i % 2), 5 + i * 2, 3, 2, hair); for (i = 0; i < 7; i++) px(17 - (i % 2), 5 + i * 2, 3, 2, hair); break;
+      case 'buzz': px(6, 3, 12, 2, shade(hair, 1.2)); break;
     }
     var mouth = shade(f.skin, 0.6), brow = shade(f.hair === f.skin ? '#555555' : f.hair, 0.8);
     if (emo === 'shock') { px(7, 9, 4, 3, '#fff'); px(13, 9, 4, 3, '#fff'); px(8, 10, 1, 1, f.eyes); px(14, 10, 1, 1, f.eyes); }
@@ -1081,6 +1087,13 @@
       case 'glasses': px(7, 9, 4, 3, 'rgba(0,0,0,.5)'); px(13, 9, 4, 3, 'rgba(0,0,0,.5)'); px(11, 10, 2, 1, '#111'); break;
       case 'shades': px(7, 9, 10, 3, '#111'); px(8, 9, 2, 1, '#555'); break;
       case 'monocle': px(13, 9, 4, 4, 'rgba(255,215,0,.35)'); px(13, 9, 4, 1, '#ffd700'); px(16, 13, 1, 5, '#ffd700'); break;
+      case 'cig': px(15, 15, 4, 1, '#f5f5f5'); px(19, 15, 1, 1, '#ff7043'); px(19, 13, 1, 1, 'rgba(220,220,220,.5)'); px(20, 12, 1, 1, 'rgba(220,220,220,.35)'); break;
+      case 'hachimaki': px(5, 5, 14, 2, '#f5f5f5'); px(9, 5, 3, 2, '#e53935'); px(3, 6, 2, 3, '#f5f5f5'); break;
+      case 'bandana': px(5, 3, 14, 3, '#c62828'); px(6, 4, 1, 1, '#fff'); px(12, 3, 1, 1, '#fff'); px(3, 5, 3, 2, '#c62828'); break;
+      case 'earring': px(5, 12, 1, 2, '#ffd700'); px(18, 12, 1, 2, '#ffd700'); break;
+      case 'nurse': px(7, 1, 10, 3, '#fafafa'); px(11, 2, 2, 1, '#e53935'); break;
+      case 'helmet': px(5, 2, 14, 5, '#eceff1'); px(4, 5, 2, 8, '#eceff1'); px(18, 5, 2, 8, '#eceff1'); px(6, 4, 12, 1, '#e53935'); break;
+      case 'freckles': px(8, 12, 1, 1, '#b07050'); px(10, 13, 1, 1, '#b07050'); px(14, 13, 1, 1, '#b07050'); px(16, 12, 1, 1, '#b07050'); break;
     }
   }
   R.drawPortrait = drawPortrait;

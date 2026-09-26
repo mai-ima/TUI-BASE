@@ -1145,3 +1145,9 @@ body.ui-tui .st-ui { color: var(--bg); background: var(--accent); border-color: 
 .rx-canvas3d { image-rendering: auto; }
 .rx-canvas.overlay { background: transparent; z-index: 1; }
 .rx-over { z-index: 2; }
+/* ストーリーのタブ */
+.rx-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; position: sticky; top: 0; z-index: 3; background: rgba(12,16,24,.96); padding: 4px 0; }
+.rx-tab { background: rgba(255,255,255,.06); color: #cfd8dc; border: 1px solid rgba(255,255,255,.15); border-radius: 6px 6px 0 0; padding: 6px 12px; font: inherit; font-size: .88em; cursor: pointer; }
+.rx-tab:hover { background: rgba(92,207,160,.15); }
+.rx-tab.on { background: rgba(92,207,160,.25); color: #fff; border-color: #5ccfa0; font-weight: 700; }
+.rx-story-head { margin: 0 0 6px; padding: 6px 10px; border-left: 3px solid #5ccfa0; background: rgba(255,255,255,.04); }

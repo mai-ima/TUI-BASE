@@ -125,7 +125,10 @@
         for (var i = pts.length ? 1 : 0; i < p.length / 3; i++) { pts.push(p[i * 3], p[i * 3 + 1], p[i * 3 + 2]); if (pts.length > 3) sts.push(e.st[Math.min(e.st.length - 1, h & 1 ? e.st.length - i : i - 1)] || 0); }
       });
     }
-    return { p: new Float32Array(pts), st: new Uint8Array(sts) };
+    // 長すぎる公道は途中まで（ゲームとして 6〜9km）
+    var maxLen = o.maxLen || 8500, L = 0, cut = pts.length / 3;
+    for (var q = 1; q < pts.length / 3; q++) { L += Math.hypot(pts[q * 3] - pts[q * 3 - 3], pts[q * 3 + 1] - pts[q * 3 - 2]); if (L > maxLen && !o.loop) { cut = q + 1; break; } }
+    return { p: new Float32Array(pts.slice(0, cut * 3)), st: new Uint8Array(sts.slice(0, cut - 1)) };
   }
   Object.keys(HM).forEach(function (id) {
     var o = HM[id];

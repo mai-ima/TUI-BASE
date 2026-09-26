@@ -24,7 +24,7 @@
      ===================================================================== */
 
   var lenCache = {};
-  function trackLen(id) { if (!lenCache[id]) lenCache[id] = R.buildTrack(id, false, 'clear').length; return lenCache[id]; }
+  function trackLen(id) { if (!lenCache[id]) { var L0 = R.buildTrack(id, false, 'clear').length; if (R.needsMap(id) && !R.Map.ready) return L0; lenCache[id] = L0; } return lenCache[id]; }
   function estLap(id) { return trackLen(id) / (R.MAX * 0.8); }
   function lapTarget(track, factor) { return trackLen(track) / (R.MAX * factor) * 1000; }
   function isTouge(id) { return typeof id === 'string' && !!R.TRACKS[id].touge; }
@@ -95,10 +95,31 @@
     if (ev.boss) { f.pop(); f.unshift(R.boss(ev.boss, ev.pace * 1.02)); }
     return f;
   }
-  function storyCfg(ev) {
+  function storyCfg(ev, st) {
     var c = baseCfg({ track: ev.track, mode: ev.mode, laps: ev.laps, field: storyField(ev), traffic: ev.traffic, carId: ev.car, weather: ev.weather });
     c.radio = ev.radio || null;
+    if (st && st.filter) c.filter = st.filter;
     return c;
+  }
+
+  /* ---------- ストーリー（本編・ストーリー2・3、サブストーリー） ---------- */
+  function stories() { return R.STORIES || []; }
+  function storyOf(sid) { return stories().filter(function (x) { return x.id === sid; })[0] || stories()[0]; }
+  function progOf(s, sid) { return sid === 's1' ? (s.story || 0) : ((s.stories || {})[sid] || 0); }
+  function setProg(s, sid, n) {
+    if (sid === 's1') s.story = Math.max(s.story || 0, n);
+    else { s.stories = s.stories || {}; s.stories[sid] = Math.max(s.stories[sid] || 0, n); }
+  }
+  function sideOpen(s, st, ev) { var i = st.events.map(function (e) { return e.id; }).indexOf(ev.after); return i < 0 || progOf(s, st.id) > i; }
+  function sideDone(s, ev) { return !!(s.side || {})[ev.id]; }
+  /** 話の id から、どのストーリーのどの話かを探す */
+  function findEvent(id) {
+    var hit = null;
+    stories().forEach(function (st) {
+      st.events.forEach(function (e, i) { if (e.id === id) hit = { st: st, ev: e, idx: i, side: false }; });
+      (st.side || []).forEach(function (e, i) { if (e.id === id) hit = { st: st, ev: e, idx: i, side: true }; });
+    });
+    return hit;
   }
 
   function goalText(goal, track) {
@@ -110,6 +131,7 @@
       case 'arcade': return L('制限時間内に全周回を走りきる', 'Finish all laps before time runs out');
       case 'catch': return L('逃走車に体当たりして確保する', 'Ram the getaway car to a stop');
       case 'score': return L(goal.n + ' 点以上をとる', 'Score ' + goal.n + ' or more');
+      case 'finish': return L('最後まで走りきる', 'Make it to the end');
     }
     return '';
   }
@@ -122,6 +144,7 @@
       case 'survive': case 'arcade': return fin;
       case 'catch': return !!r.caught;
       case 'score': return r.score >= goal.n;
+      case 'finish': return fin || r.place > 0;
     }
     return false;
   }
@@ -198,12 +221,12 @@
         }
         break;
       case 'story':
-        var ev = ctx.ev, idx = R.STORY.indexOf(ev);
+        var ev = ctx.ev, stO = storyOf(ctx.sid || 's1'), idx = stO.events.indexOf(ev);
         out.success = checkGoal(ev.goal, r, ev.track);
         out.lines.unshift(out.success ? L('✔ 目標達成：', '✔ Objective complete: ') + goalText(ev.goal, ev.track) : L('✘ 目標未達成：', '✘ Objective failed: ') + goalText(ev.goal, ev.track));
         if (out.success) {
-          money = s.story > idx ? ev.reward * 0.3 : ev.reward;
-          if (s.story <= idx) s.story = idx + 1;
+          if (ctx.side) { s.side = s.side || {}; money = s.side[ev.id] ? ev.reward * 0.3 : ev.reward; s.side[ev.id] = true; }
+          else { money = progOf(s, stO.id) > idx ? ev.reward * 0.3 : ev.reward; setProg(s, stO.id, idx + 1); }
           if (ev.boss) s.bosses[ev.boss] = true;
           if (ev.unlock && s.owned.indexOf(ev.unlock) < 0) { s.owned.push(ev.unlock); out.lines.push(L('🔓 新しい車「', '🔓 New car: ') + t(R.car(ev.unlock).name) + L('」が手に入った！', '')); }
         }
@@ -544,6 +567,7 @@
 
     function startDemo() {
       if (R.Music) R.Music.play('title');
+      if (cv) cv.style.filter = '';
       var ids = loopTracks();
       var id = ids[Math.floor(Math.random() * ids.length)];
       app.demo = R.Session({ track: id, weather: R.TRACKS[id].weather, demo: true, laps: Infinity, field: R.makeField(6, 0.95), traffic: R.TRACKS[id].traffic || 0,
@@ -589,6 +613,7 @@
       var cols = parseInt((cur.closest('[data-cols]') || { getAttribute: function () { return '1'; } }).getAttribute('data-cols'), 10) || 1;
       if (k === 'ArrowDown' || k === 's' || k === 'j') move(cols);
       else if (k === 'ArrowUp' || k === 'w' || k === 'k') move(-cols);
+      else if ((k === 'ArrowLeft' || k === 'ArrowRight') && app.curScreen && app.curScreen.tabs && !cur._lr && app.tabKeys) { app.tabKeys(k === 'ArrowLeft' ? -1 : 1); sfx('click'); }
       else if (k === 'ArrowLeft' || k === 'a' || k === 'h') { if (cur._lr) { cur._lr(-1); sfx('click'); } else move(-1); }
       else if (k === 'ArrowRight' || k === 'd' || k === 'l') { if (cur._lr) { cur._lr(1); sfx('click'); } else move(1); }
       else if (k === 'Enter' || k === ' ') { cur.click(); }
@@ -614,7 +639,7 @@
     function show(screen, keepSel) {
       over.classList.remove('hidden');
       over.innerHTML = '';
-      app.keyHook = null;
+      app.keyHook = null; app.curScreen = screen; app.tabKeys = null;
       screen.build(over);
       if (!keepSel) app.sel = screen.sel || 0;
       var f = focusables();
@@ -734,47 +759,93 @@
       } };
     };
 
-    /* ---------- ストーリー ---------- */
-    SCREENS.story = function () {
+    /* ---------- ストーリー（タブで本編・ストーリー2・3・サブストーリーを切り替え） ---------- */
+    SCREENS.story = function (tab0) {
+      if (tab0) app.storyTab = tab0;
       return { build: function (o) {
-        var s = R.load();
-        var p = panel(L('ストーリー', 'Story'), L('クリア ', 'Cleared ') + Math.min(s.story, R.STORY.length) + ' / ' + R.STORY.length);
-        var items = [], firstOpen = 0;
-        R.CHAPTERS.forEach(function (ch) {
-          var evs = R.STORY.filter(function (e) { return e.ch === ch.id; });
-          if (!evs.length) return;
-          items.push(el('div', 'rx-sec', t(ch.name)));
-          evs.forEach(function (ev) {
-            var idx = R.STORY.indexOf(ev), locked = idx > s.story, cleared = idx < s.story;
-            if (idx === s.story) firstOpen = items.filter(function (x) { return x.classList.contains('rx-f'); }).length;
-            items.push(item((cleared ? '✔ ' : locked ? '🔒 ' : '▶ ') + t(ev.title),
-                            trackName(ev.track) + '　' + t((R.MODES[ev.mode] || R.MODES.race).name) + '　' + goalText(ev.goal, ev.track),
-                            function () { storyEvent(idx, true); }, { dis: locked, right: yen(ev.reward) }));
-          });
+        var tab = app.storyTab || 's1';
+        var s = R.load(), sts = stories();
+        // 浜松の公道コースの目標タイムは地図がないと計れないので、先に読み込む
+        if (!R.Map.ready && sts.some(function (x) { return x.events.concat(x.side || []).some(function (e) { return R.needsMap(e.track); }); })) R.Map.load(function () { if (app.curScreen && app.curScreen.tabs) refresh(); });
+        var p = panel(L('ストーリー', 'Story'), L('上のタブでストーリーを切り替え（← → でも可）', 'Switch stories with the tabs (or ← →)'));
+        // タブ
+        var tabs = el('div', 'rx-tabs');
+        var keys = sts.map(function (x) { return x.id; }).concat(['side']);
+        keys.forEach(function (k) {
+          var st = k === 'side' ? null : storyOf(k);
+          var label = k === 'side' ? L('サブストーリー', 'Side stories') : t(st.name);
+          var prog = k === 'side' ? '' : ' ' + Math.min(progOf(s, k), st.events.length) + '/' + st.events.length;
+          var b = el('button', 'rx-tab' + (k === tab ? ' on' : ''), label + prog);
+          b.addEventListener('click', function () { app.storyTab = k; refresh(); });
+          tabs.appendChild(b);
         });
+        p.appendChild(tabs);
+        app.tabKeys = function (d) { var i = keys.indexOf(tab); app.storyTab = keys[(i + d + keys.length) % keys.length]; refresh(); };
+        var items = [], firstOpen = 0;
+        if (tab === 'side') {
+          sts.forEach(function (st) {
+            if (!st.side || !st.side.length) return;
+            items.push(el('div', 'rx-sec', t(st.name)));
+            st.side.forEach(function (ev, i) {
+              var open = sideOpen(s, st, ev), done = sideDone(s, ev), who = R.CHARS[ev.char] ? t(R.CHARS[ev.char].name) : '';
+              var need = findEvent(ev.after);
+              items.push(item((done ? '✔ ' : open ? '★ ' : '🔒 ') + t(ev.title),
+                              (who ? who + L(' の話　', "'s story  ") : '') + trackName(ev.track) + '　' + (open ? goalText(ev.goal, ev.track) : L('「', 'after "') + (need ? t(need.ev.title) : '') + L('」のあとで開放', '"')),
+                              function () { storyEvent(st.id, i, true, true); }, { dis: !open, right: yen(ev.reward) }));
+            });
+          });
+        } else {
+          var st = storyOf(tab), pr = progOf(s, tab);
+          var head = el('div', 'rx-story-head');
+          head.appendChild(el('div', 'rx-s', '【' + st.era + '・' + st.place + '】' + (st.hero && R.CHARS[st.hero] ? L('　主人公: ', '  Hero: ') + t(R.CHARS[st.hero].name) : '')));
+          head.appendChild(el('div', 'rx-s', t(st.desc)));
+          p.appendChild(head);
+          st.chapters.forEach(function (ch) {
+            var evs = st.events.filter(function (e) { return e.ch === ch.id; });
+            if (!evs.length) return;
+            items.push(el('div', 'rx-sec', t(ch.name)));
+            evs.forEach(function (ev) {
+              var idx = st.events.indexOf(ev), locked = idx > pr, cleared = idx < pr;
+              if (idx === pr) firstOpen = items.filter(function (x) { return x.classList.contains('rx-f'); }).length;
+              items.push(item((cleared ? '✔ ' : locked ? '🔒 ' : '▶ ') + t(ev.title),
+                              trackName(ev.track) + '　' + t((R.MODES[ev.mode] || R.MODES.race).name) + '　' + goalText(ev.goal, ev.track),
+                              function () { storyEvent(st.id, idx, true); }, { dis: locked, right: yen(ev.reward) }));
+            });
+          });
+        }
         p.appendChild(list(items));
-        p.appendChild(hint());
+        p.appendChild(hint(L('↑↓ 選ぶ　← → タブ切り替え　Enter 決定　Esc 戻る', '↑↓ pick  ← → tabs  Enter start  Esc back')));
         o.appendChild(p);
         this.sel = firstOpen;
-      }, sel: 0 };
+      }, sel: 0, tabs: true };
     };
 
-    function storyEvent(idx, withScene) {
-      var ev = R.STORY[idx];
-      function brief() { go(SCREENS.brief(idx)); }
-      if (withScene && ev.scene) scene(ev.scene, brief); else brief();
+    function evOf(sid, idx, side) { var st = storyOf(sid); return side ? st.side[idx] : st.events[idx]; }
+    function storyEvent(sid, idx, withScene, side) {
+      var ev = evOf(sid, idx, side), st = storyOf(sid);
+      function brief() { go(SCREENS.brief(sid, idx, side)); }
+      if (withScene && ev.scene) scene(ev.scene, brief, st.filter); else brief();
     }
 
-    SCREENS.brief = function (idx) {
-      var ev = R.STORY[idx];
+    SCREENS.brief = function (sid, idx, side) {
+      var st = storyOf(sid), ev = evOf(sid, idx, side);
       return { build: function (o) {
         var s = R.load();
-        var p = panel(t(ev.title), t(R.CHAPTERS.filter(function (c) { return c.id === ev.ch; })[0].name));
+        if (R.needsMap(ev.track) && !R.Map.ready) { var me = this; R.Map.load(function () { if (app.curScreen === me) refresh(); }); }
+        var chName = side ? L('サブストーリー', 'Side story') : t((st.chapters.filter(function (c) { return c.id === ev.ch; })[0] || { name: '' }).name);
+        var p = panel(t(ev.title), t(st.name) + '　' + chName);
         var row = el('div', 'rx-row');
-        row.appendChild(preview(ev.track, 400, 225));
+        var pvBox = el('div', 'rx-pv');
+        function drawPv() {
+          if (R.needsMap(ev.track) && !R.Map.ready) { pvBox.innerHTML = ''; pvBox.appendChild(el('div', 'rx-s', L('地図を読み込み中…', 'Loading map...'))); R.Map.load(drawPv); return; }
+          pvBox.innerHTML = ''; var c2 = preview(ev.track, 400, 225); if (st.filter) c2.style.filter = st.filter; pvBox.appendChild(c2);
+        }
+        drawPv();
+        row.appendChild(pvBox);
         var info = el('div', 'rx-info');
+        var replay = side ? sideDone(s, ev) : idx < progOf(s, sid);
         [[L('コース', 'Track'), trackName(ev.track)], [L('種目', 'Mode'), t((R.MODES[ev.mode] || R.MODES.race).name)],
-         [L('目標', 'Goal'), goalText(ev.goal, ev.track)], [L('報酬', 'Reward'), yen(ev.reward) + (idx < s.story ? L('（再挑戦は 3 割）', ' (30% on replay)') : '')],
+         [L('目標', 'Goal'), goalText(ev.goal, ev.track)], [L('報酬', 'Reward'), yen(ev.reward) + (replay ? L('（再挑戦は 3 割）', ' (30% on replay)') : '')],
          [L('車', 'Car'), ev.car ? t(R.car(ev.car).name) + L('（指定）', ' (fixed)') : t(R.car(s.car).name)]].forEach(function (kv) {
           var d = el('div', 'rx-kv'); d.appendChild(el('span', 'rx-k', kv[0])); d.appendChild(el('span', 'rx-vv', kv[1])); info.appendChild(d);
         });
@@ -782,8 +853,8 @@
         row.appendChild(info);
         p.appendChild(row);
         p.appendChild(list([
-          item(L('スタート', 'Start'), '', function () { runStory(idx); }, { icon: '🏁', cls: 'accent' }),
-          item(L('会話をもう一度', 'Replay scene'), '', function () { if (ev.scene) scene(ev.scene, function () { refresh(); }); }, { icon: '💬', dis: !ev.scene }),
+          item(L('スタート', 'Start'), '', function () { runStory(sid, idx, side); }, { icon: '🏁', cls: 'accent' }),
+          item(L('会話をもう一度', 'Replay scene'), '', function () { if (ev.scene) scene(ev.scene, function () { refresh(); }, st.filter); }, { icon: '💬', dis: !ev.scene }),
           item(L('ガレージ', 'Garage'), '', function () { go(SCREENS.garage()); }, { icon: '🔧', dis: !!ev.car }),
           item(L('戻る', 'Back'), '', function () { back(); }, { icon: '↩' })
         ], 2));
@@ -792,30 +863,31 @@
       } };
     };
 
-    function runStory(idx) {
-      var ev = R.STORY[idx];
+    function runStory(sid, idx, side) {
+      var st = storyOf(sid), ev = evOf(sid, idx, side);
       app.cmd = 'story ' + ev.id;
       run({
-        make: function () { return storyCfg(ev); },
-        onResult: function (r) { return applyResult({ kind: 'story', ev: ev, track: ev.track }, r); },
+        make: function () { return storyCfg(ev, st); },
+        onResult: function (r) { return applyResult({ kind: 'story', ev: ev, sid: sid, side: side, track: ev.track }, r); },
         buttons: function (sum) {
           if (sum.success) return [{ label: L('次へ', 'Continue'), on: function () {
             var after = function () {
-              if (ev.id === 'f1') { credits(); return; }
+              if (side) { app.stack = app.stack.slice(0, 2); show(app.stack[1]); return; }
+              if (ev.final) { credits(st); return; }
               var nx = idx + 1;
               app.stack = app.stack.slice(0, 2);   // タイトル・ストーリー一覧まで戻す
-              if (nx < R.STORY.length) { show(app.stack[1]); storyEvent(nx, true); } else show(app.stack[1]);
+              if (nx < st.events.length) { show(app.stack[1]); storyEvent(sid, nx, true); } else show(app.stack[1]);
             };
-            if (ev.post) scene(ev.post, after); else after();
+            if (ev.post) scene(ev.post, after, st.filter); else after();
           } }, { label: L('ストーリー一覧', 'Story list'), on: function () { app.stack = app.stack.slice(0, 2); show(app.stack[1]); } }];
-          return [{ label: L('リトライ', 'Retry'), on: function () { runStory(idx); } },
+          return [{ label: L('リトライ', 'Retry'), on: function () { runStory(sid, idx, side); } },
                   { label: L('作戦を練る（戻る）', 'Back to briefing'), on: function () { refresh(); } }];
         }
       });
     }
 
     /* 会話シーン。背景・立ち絵（表情つき）・演出（揺れ・フラッシュ・集中線・擬音）・章タイトル・ナレーション・VS 画面 */
-    function scene(lines, done) {
+    function scene(lines, done, filter) {
       if (R.Music) R.Music.play(lines.some(function (ln) { return ln && ln.bgm === 'tension'; }) ? 'tension' : 'story');
       over.classList.remove('hidden');
       over.innerHTML = '';
@@ -830,6 +902,7 @@
       var card = el('div', 'rx-scn-card'), narr = el('div', 'rx-scn-narr'), vs = el('div', 'rx-scn-vs');
       [bg, speed, faceL, faceR, el('div', 'rx-scn-bar top'), el('div', 'rx-scn-bar bottom'), sfxEl, box, narr, card, vs, flashEl].forEach(function (x) { root.appendChild(x); });
       over.appendChild(root);
+      if (filter) root.style.filter = filter;
 
       // 集中線
       (function () {
@@ -942,12 +1015,15 @@
       showLine();
     }
 
-    function credits() {
+    function credits(st) {
       over.innerHTML = '';
       var box = el('div', 'rx-credits');
-      ['THE END', '', 'TUI RACING', L('ストーリー完結！', 'Story complete!'), '',
-       L('番外編「峠の走り屋たち」が開放されました', 'Extra chapter "Legends of the Pass" unlocked'), L('プロトタイプ ZERO がガレージに届きました', 'Prototype ZERO is in your garage'),
-       '', 'Thank you for playing.'].forEach(function (ln, i) { box.appendChild(el('div', i === 0 ? 'rx-end' : '', ln)); });
+      var lines = st && st.id !== 's1'
+        ? ['THE END', '', t(st.name), L('ストーリー完結！', 'Story complete!'), '', L('サブストーリーのタブで、その後の話が読めます', 'More in the Side stories tab'), '', 'Thank you for playing.']
+        : ['THE END', '', 'TUI RACING', L('本編「天竜の白い亡霊」完結！', 'Main story complete!'), '',
+           L('番外編「峠の走り屋たち」が開放されました', 'Extra chapter "Legends of the Pass" unlocked'), L('プロトタイプ ZERO がガレージに届きました', 'Prototype ZERO is in your garage'),
+           L('ストーリー2・3、サブストーリーもどうぞ', 'Try Stories 2 & 3 and the side stories'), '', 'Thank you for playing.'];
+      lines.forEach(function (ln, i) { box.appendChild(el('div', i === 0 ? 'rx-end' : '', ln)); });
       over.appendChild(box);
       sfx('win');
       app.keyHook = function () { app.keyHook = null; app.stack = app.stack.slice(0, 2); show(app.stack[1]); return true; };
@@ -1443,6 +1519,7 @@
       startRun(cfg, opts);
     }
     function startRun(cfg, opts) {
+      cv.style.filter = cfg.filter || '';
       if (R.Music) R.Music.play(R.Music.forRace(cfg));
       prep(cfg, opts);
       app.sess = R.Session(cfg);
@@ -1460,6 +1537,7 @@
         if (!ok || !app.sess || app.closed) return;
         if (!cv3) { cv3 = el('canvas', 'rx-canvas rx-canvas3d'); stage.insertBefore(cv3, cv); }
         cv3.width = cv.width; cv3.height = cv.height;
+        cv3.style.filter = (app.sess.cfg && app.sess.cfg.filter) || '';
         try {
           if (!app.r3d) app.r3d = R.Render3D(cv3, app.sess); else app.r3d.rebuild(app.sess);
           app.r3d.resize(cv.width, cv.height);
@@ -1590,9 +1668,9 @@
       show(app.stack[0]);
       var s = R.load();
       if (a === 'story') {
-        go(SCREENS.story());
-        var id = parts[1], idx = id ? R.STORY.indexOf(R.storyEvent(id)) : Math.min(s.story, R.STORY.length - 1);
-        if (idx >= 0 && idx <= s.story) go(SCREENS.brief(idx));
+        var hit = parts[1] ? findEvent(parts[1]) : null, stp = parts[1] && !hit ? storyOf(parts[1]) : null;
+        go(SCREENS.story(hit ? (hit.side ? 'side' : hit.st.id) : stp ? stp.id : null));
+        if (hit && (hit.side ? sideOpen(s, hit.st, hit.ev) : hit.idx <= progOf(s, hit.st.id))) go(SCREENS.brief(hit.st.id, hit.idx, hit.side));
       } else if (a === 'world') go(SCREENS.world(null));
       else if (a === 'job' || a === 'jobs') { go(SCREENS.jobs()); if (R.JOBS[parts[1]]) go(SCREENS.world(parts[1])); }
       else if (a === 'gp' || a === 'career') { go(SCREENS.gp()); var cup = R.CUPS.filter(function (c) { return c.id === parts[1]; })[0]; if (cup && R.cupUnlocked(s, cup)) go(SCREENS.cup(cup.id)); }
@@ -1779,20 +1857,33 @@
   }
   function tuiStory(id) {
     var s = R.load();
-    var idx = id ? R.STORY.indexOf(R.storyEvent(id)) : s.story;
-    if (idx < 0) idx = s.story;
-    if (idx > s.story) { out([[{ t: L('まだ開放されていません。', 'Not unlocked yet.'), c: 'err' }]]); idx = s.story; }
-    if (idx >= R.STORY.length) {
-      var o = TB.head(L('ストーリー', 'Story'));
+    var hit = id ? findEvent(id) : null, st = hit ? hit.st : storyOf(id && storyOf(id).id === id ? id : 's1');
+    if (id === 'list' || (id && !hit && !stories().some(function (x) { return x.id === id; }))) {
+      var o0 = TB.head(L('ストーリー', 'Story'));
+      stories().forEach(function (x) {
+        o0.push([link(t(x.name), 'race story ' + x.id), { t: '  ' + x.era + '・' + x.place + '  ' + Math.min(progOf(s, x.id), x.events.length) + '/' + x.events.length, c: 'dim' }]);
+        (x.side || []).forEach(function (e) { if (sideOpen(s, x, e)) o0.push([{ t: '    ★ ' }, link(t(e.title), 'race story ' + e.id), { t: sideDone(s, e) ? '  ✔' : '', c: 'accent' }]); });
+      });
+      out(o0.concat(['']));
+      return;
+    }
+    var side = hit ? hit.side : false, pr = progOf(s, st.id);
+    var idx = hit ? hit.idx : pr;
+    if (!side && idx > pr) { out([[{ t: L('まだ開放されていません。', 'Not unlocked yet.'), c: 'err' }]]); idx = pr; }
+    if (side && !sideOpen(s, st, hit.ev)) { out([[{ t: L('まだ開放されていません。', 'Not unlocked yet.'), c: 'err' }]]); return; }
+    if (!side && idx >= st.events.length) {
+      var o = TB.head(t(st.name));
       o.push([{ t: L('全エピソードをクリアしました！ もう一度遊ぶ話を選べます。', 'All episodes cleared! Pick one to replay.'), c: 'accent' }]);
-      R.STORY.forEach(function (e) { o.push([{ t: '  ' }, link(t(e.title), 'race story ' + e.id), { t: '  ' + trackName(e.track), c: 'dim' }]); });
+      st.events.forEach(function (e) { o.push([{ t: '  ' }, link(t(e.title), 'race story ' + e.id), { t: '  ' + trackName(e.track), c: 'dim' }]); });
+      o.push([{ t: L('ほかのストーリー: ', 'Other stories: '), c: 'dim' }, link('race story list', 'race story list')]);
       out(o.concat(['']));
       return;
     }
-    var ev = R.STORY[idx];
+    var ev = side ? st.side[idx] : st.events[idx];
     var o2 = [''];
-    var first = R.STORY.filter(function (e) { return e.ch === ev.ch; })[0] === ev;
-    if (first) o2.push([{ t: '━━ ' + t(R.CHAPTERS.filter(function (c) { return c.id === ev.ch; })[0].name) + ' ━━', c: 'accent bold' }]);
+    var first = !side && st.events.filter(function (e) { return e.ch === ev.ch; })[0] === ev;
+    if (first) o2.push([{ t: '━━ ' + t(st.name) + '　' + t((st.chapters.filter(function (c) { return c.id === ev.ch; })[0] || { name: '' }).name) + ' ━━', c: 'accent bold' }]);
+    if (side) o2.push([{ t: '━━ ' + L('サブストーリー', 'Side story') + ' ━━', c: 'accent bold' }]);
     if (ev.scene) o2 = o2.concat(sceneLines(ev.scene));
     o2.push('', [{ t: '■ ' + t(ev.title), c: 'warn bold' }]);
     o2.push({ row: [L('コース', 'track'), trackName(ev.track)] });
@@ -1803,14 +1894,15 @@
     out(o2);
     ask('story>', function (v) {
       if (v === 'q') { out([[{ t: L('ストーリーを中断しました。', 'Story paused.'), c: 'dim' }], '']); return; }
-      tuiRun(storyCfg(ev), { title: t(ev.title), subtitle: goalText(ev.goal, ev.track), cmd: 'story ' + ev.id,
-                             onResult: function (r) { return applyResult({ kind: 'story', ev: ev, track: ev.track }, r); } }, function (r, sum) {
+      tuiRun(storyCfg(ev, st), { title: t(ev.title), subtitle: goalText(ev.goal, ev.track), cmd: 'story ' + ev.id,
+                                 onResult: function (r) { return applyResult({ kind: 'story', ev: ev, sid: st.id, side: side, track: ev.track }, r); } }, function (r, sum) {
         if (!sum) return;
         if (sum.success) {
           if (ev.post) out(sceneLines(ev.post).concat(['']));
-          if (ev.id === 'f1') out([[{ t: 'THE END — Thank you for playing.', c: 'accent bold' }], [{ t: L('番外編が開放されました: ', 'Extra chapter unlocked: '), c: 'dim' }, link('race story', 'race story')], '']);
+          if (ev.final) out([[{ t: 'THE END — ' + t(st.name), c: 'accent bold' }], [{ t: L('ほかのストーリー: ', 'More stories: '), c: 'dim' }, link('race story list', 'race story list')], '']);
+          if (side) { out([[{ t: L('サブストーリー完了。', 'Side story complete.'), c: 'accent' }], ['']]); return; }
           out([[{ t: L('Enter で次の話へ / q でやめる', 'Enter for the next episode / q to stop'), c: 'dim' }]]);
-          ask('story>', function (v2) { if (v2 !== 'q') tuiStory(); });
+          ask('story>', function (v2) { if (v2 !== 'q') tuiStory(st.id); });
         } else {
           out([[{ t: L('Enter でリトライ / q でやめる', 'Enter to retry / q to stop'), c: 'dim' }]]);
           ask('story>', function (v2) { if (v2 !== 'q') tuiStory(ev.id); });
