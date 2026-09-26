@@ -137,7 +137,7 @@
         // 実在の道: 両側の地面の色・歩道
         var fa = f * (Math.floor(i / 6) % 2 ? 1 : 0.965);
         if (GR && s.luL !== undefined) { s.cGrassL = shade(GR[s.luL] || pal.grass[0], fa); s.cGrassR = shade(GR[s.luR] || pal.grass[0], fa); }
-        if (s.urban && !spec.hwy) { s.cRumble = shade(alt ? '#b9b6ae' : '#b1aea6', f); s.rumW = 2.6 / (spec.geom.hw || 4); s.curb = true; }
+        if (s.urban && !spec.hwy) { s.cRumble = shade(alt ? '#a8a59d' : '#a19e96', f); s.rumW = 2.6 / (spec.geom.hw || 4); s.curb = true; }
         else { s.cRumble = shade(alt ? '#8f9086' : '#88897f', f); s.rumW = 1.0 / (spec.geom.hw || 4); }
       }
     });

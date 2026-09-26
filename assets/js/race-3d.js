@@ -27,6 +27,7 @@
     if (window.THREE && TB.RaceTex) { cb(true); return; }
     loadScript('assets/vendor/three.min.js', function (ok) {
       if (!ok || !window.THREE) { cb(false); return; }
+      if (THREE.ColorManagement) THREE.ColorManagement.legacyMode = false;   // 色を sRGB として正しく扱う
       // 写真テクスチャ（Poly Haven, CC0）。読めなくても 3D は動く
       loadScript('assets/vendor/race-tex.js', function () { cb(true); });
     });
@@ -42,6 +43,7 @@
     img.src = TB.RaceTex[name];
     t.wrapS = t.wrapT = THREE.RepeatWrapping; t.encoding = THREE.sRGBEncoding; t.anisotropy = 8;
     if (name === 'sky') { t.wrapS = THREE.RepeatWrapping; t.wrapT = THREE.ClampToEdgeWrapping; }
+    t.userData.keep = true;
     texStore[key] = t;
     return t;
   };
@@ -318,10 +320,286 @@
     return dynamic;
   }
 
-  /* ---------- 車の立体 ---------- */
+  /* =====================================================================
+     車の立体（高ポリゴン）
+     横から見た輪郭（屋根・ボンネット・トランクの線）と上から見た幅から、
+     断面を滑らかにつないで車体を作る。塗装はクリアコート、ガラスと灯火は別の材質。
+     ===================================================================== */
+  // 形: L 全長, W 全幅, H 全高, 上の線 [t(0=後ろ 1=前), 高さ], belt 窓の下の線, cab [窓の始まり, 終わり], roofW 屋根の幅の比
+  var SHAPES = {
+    sedan: { L: 4.7, W: 1.8, top: [[0, 0.78], [0.03, 0.9], [0.18, 0.98], [0.3, 1.02], [0.4, 1.4], [0.47, 1.44], [0.63, 1.44], [0.75, 1.05], [0.9, 0.95], [0.985, 0.82], [1, 0.68]], belt: 0.98, cab: [0.3, 0.75], roofW: 0.78 },
+    coupe: { L: 4.45, W: 1.75, top: [[0, 0.74], [0.03, 0.86], [0.14, 0.94], [0.25, 0.98], [0.37, 1.3], [0.47, 1.34], [0.6, 1.33], [0.72, 1.0], [0.9, 0.9], [0.985, 0.76], [1, 0.62]], belt: 0.95, cab: [0.25, 0.72], roofW: 0.76 },
+    sports: { L: 4.45, W: 1.85, top: [[0, 0.76], [0.03, 0.9], [0.1, 0.95], [0.22, 1.0], [0.38, 1.22], [0.5, 1.26], [0.58, 1.24], [0.7, 0.92], [0.88, 0.8], [0.985, 0.66], [1, 0.52]], belt: 0.9, cab: [0.22, 0.7], roofW: 0.72 },
+    super: { L: 4.55, W: 1.98, top: [[0, 0.82], [0.03, 0.95], [0.12, 1.0], [0.3, 1.02], [0.45, 1.13], [0.55, 1.15], [0.62, 1.12], [0.72, 0.84], [0.88, 0.72], [0.985, 0.58], [1, 0.46]], belt: 0.86, cab: [0.34, 0.72], roofW: 0.68 },
+    hatch: { L: 4.0, W: 1.72, top: [[0, 0.8], [0.02, 1.02], [0.06, 1.38], [0.12, 1.46], [0.55, 1.47], [0.7, 1.08], [0.9, 0.96], [0.985, 0.82], [1, 0.7]], belt: 0.98, cab: [0.05, 0.7], roofW: 0.8 },
+    wagon: { L: 4.7, W: 1.78, top: [[0, 0.8], [0.02, 1.02], [0.05, 1.4], [0.1, 1.47], [0.6, 1.48], [0.74, 1.06], [0.9, 0.95], [0.985, 0.82], [1, 0.68]], belt: 0.98, cab: [0.04, 0.74], roofW: 0.8 },
+    kei: { L: 3.4, W: 1.48, top: [[0, 0.85], [0.02, 1.3], [0.05, 1.68], [0.1, 1.75], [0.7, 1.76], [0.8, 1.2], [0.92, 1.0], [0.985, 0.86], [1, 0.72]], belt: 1.0, cab: [0.04, 0.8], roofW: 0.86 },
+    suv: { L: 4.6, W: 1.88, top: [[0, 0.95], [0.02, 1.2], [0.05, 1.68], [0.1, 1.75], [0.62, 1.76], [0.74, 1.3], [0.9, 1.16], [0.985, 1.0], [1, 0.86]], belt: 1.18, cab: [0.05, 0.74], roofW: 0.84, clr: 0.36 },
+    minivan: { L: 4.8, W: 1.82, top: [[0, 0.9], [0.02, 1.3], [0.05, 1.8], [0.1, 1.86], [0.72, 1.87], [0.85, 1.25], [0.94, 1.02], [0.99, 0.86], [1, 0.72]], belt: 1.08, cab: [0.05, 0.85], roofW: 0.86 },
+    pickup: { L: 5.2, W: 1.86, top: [[0, 1.0], [0.02, 1.08], [0.4, 1.08], [0.41, 1.12], [0.43, 1.78], [0.62, 1.8], [0.72, 1.3], [0.9, 1.16], [0.985, 1.0], [1, 0.86]], belt: 1.16, cab: [0.43, 0.72], roofW: 0.84, clr: 0.34, bed: [0.02, 0.4] },
+    keitra: { L: 3.4, W: 1.48, top: [[0, 0.95], [0.02, 1.0], [0.55, 1.0], [0.56, 1.05], [0.58, 1.84], [0.9, 1.86], [0.96, 1.4], [0.99, 1.0], [1, 0.8]], belt: 1.08, cab: [0.58, 0.97], roofW: 0.9, bed: [0.02, 0.55] },
+    box: { L: 5.4, W: 2.0, top: [[0, 2.5], [0.02, 2.6], [0.8, 2.62], [0.86, 2.5], [0.93, 2.3], [0.99, 1.4], [1, 0.9]], belt: 1.5, cab: [0.82, 0.99], roofW: 0.95, clr: 0.45 },
+    bus: { L: 10.5, W: 2.45, top: [[0, 2.9], [0.01, 3.0], [0.97, 3.0], [0.99, 2.9], [1, 0.8]], belt: 1.3, cab: [0.02, 0.995], roofW: 0.94, clr: 0.4 },
+    truck: { L: 8.0, W: 2.3, top: [[0, 3.0], [0.01, 3.1], [0.74, 3.1], [0.75, 2.6], [0.76, 2.7], [0.92, 2.75], [0.97, 2.4], [0.99, 1.2], [1, 0.9]], belt: 1.6, cab: [0.77, 0.99], roofW: 0.95, clr: 0.5 }
+  };
+  // 車種 → 形と寸法の調整
+  var MODEL = {
+    sedan: ['sedan'], taxi: ['sedan', { L: 4.6 }], police: ['sedan'], limo: ['sedan', { L: 6.2 }], classic: ['sedan', { L: 4.4, W: 1.7 }], gc8: ['sedan', { L: 4.35 }],
+    evo: ['sedan', { L: 4.5 }], s13: ['coupe'], r32: ['coupe', { L: 4.55 }], ae86: ['coupe', { L: 4.2, W: 1.63 }], muscle: ['coupe', { L: 4.8, W: 1.95 }],
+    fc: ['sports'], fd: ['sports', { L: 4.3 }], zn8: ['sports', { L: 4.3 }], gt: ['sports', { L: 4.7, W: 1.9 }], rr: ['super', { L: 4.5 }], super: ['super'], wedge: ['super', { L: 4.4 }], proto: ['super', { L: 4.8, W: 2.0 }],
+    hatch: ['hatch'], rally: ['hatch', { L: 4.1 }], ev: ['hatch', { L: 4.3 }], kei: ['kei'], trike: ['kei', { L: 3.0 }], suv: ['suv'], minivan: ['minivan'], pickup: ['pickup'], keitra: ['keitra'],
+    van: ['box', { L: 4.7, W: 1.7 }], camper: ['box', { L: 5.8 }], ambulance: ['box', { L: 5.6 }], fire: ['truck', { L: 7.5 }], truck: ['truck'], bus: ['bus'], train: ['bus', { L: 18, W: 2.9 }]
+  };
+
+  function spline(pts, t) {   // 単調な 3 次補間（行き過ぎない）
+    var n = pts.length;
+    if (t <= pts[0][0]) return pts[0][1];
+    if (t >= pts[n - 1][0]) return pts[n - 1][1];
+    var i = 0; while (i < n - 2 && pts[i + 1][0] < t) i++;
+    var x0 = pts[i][0], x1 = pts[i + 1][0], y0 = pts[i][1], y1 = pts[i + 1][1], h = x1 - x0, f = (t - x0) / h;
+    function slope(k) {
+      if (k <= 0 || k >= n - 1) return 0;
+      var a = (pts[k][1] - pts[k - 1][1]) / (pts[k][0] - pts[k - 1][0]), b = (pts[k + 1][1] - pts[k][1]) / (pts[k + 1][0] - pts[k][0]);
+      return a * b <= 0 ? 0 : 2 / (1 / a + 1 / b);
+    }
+    var m0 = slope(i) * h, m1 = slope(i + 1) * h, f2 = f * f, f3 = f2 * f;
+    return (2 * f3 - 3 * f2 + 1) * y0 + (f3 - 2 * f2 + f) * m0 + (-2 * f3 + 3 * f2) * y1 + (f3 - f2) * m1;
+  }
+
+  var ENV = null;
+  function envMap(renderer) {
+    if (ENV || !renderer) return ENV;
+    var T = THREE, sc = new T.Scene();
+    var c = document.createElement('canvas'); c.width = 64; c.height = 256;
+    var g = c.getContext('2d'), gr = g.createLinearGradient(0, 0, 0, 256);
+    gr.addColorStop(0, '#5f8fc9'); gr.addColorStop(0.45, '#d9e6f2'); gr.addColorStop(0.5, '#f4f1ea'); gr.addColorStop(0.53, '#6b6f68'); gr.addColorStop(1, '#2b2d2a');
+    g.fillStyle = gr; g.fillRect(0, 0, 64, 256);
+    var tex = new T.CanvasTexture(c);
+    var sph = new T.Mesh(new T.SphereGeometry(50, 32, 16), new T.MeshBasicMaterial({ map: tex, side: T.BackSide }));
+    sc.add(sph);
+    var lamp = new T.Mesh(new T.PlaneGeometry(30, 8), new T.MeshBasicMaterial({ color: 0xffffff }));
+    lamp.position.set(0, 40, 0); lamp.rotation.x = Math.PI / 2; sc.add(lamp);
+    var pm = new T.PMREMGenerator(renderer);
+    ENV = pm.fromScene(sc, 0.02).texture;
+    pm.dispose();
+    return ENV;
+  }
+  R.carEnv = envMap;
+
+  var geoCache = {}, matCache = {};
+  function mat(kind, color) {
+    var T = THREE, key = kind + (color || '');
+    if (matCache[key]) return matCache[key];
+    var m;
+    switch (kind) {
+      case 'paint': m = new T.MeshPhysicalMaterial({ color: color, metalness: 0.15, roughness: 0.38, clearcoat: 1, clearcoatRoughness: 0.08, envMap: ENV, envMapIntensity: 0.75 }); break;
+      case 'glass': m = new T.MeshPhysicalMaterial({ color: 0x0f141c, metalness: 0.1, roughness: 0.04, clearcoat: 1, envMap: ENV, envMapIntensity: 1.4 }); break;
+      case 'trim': m = new T.MeshStandardMaterial({ color: 0x17191c, metalness: 0.2, roughness: 0.6 }); break;
+      case 'chrome': m = new T.MeshStandardMaterial({ color: 0xdfe3e8, metalness: 1, roughness: 0.12, envMap: ENV }); break;
+      case 'rim': m = new T.MeshStandardMaterial({ color: color || 0xb9bec4, metalness: 0.9, roughness: 0.25, envMap: ENV }); break;
+      case 'tire': m = new T.MeshStandardMaterial({ color: 0x151515, metalness: 0, roughness: 0.92 }); break;
+      case 'head': m = new T.MeshStandardMaterial({ color: 0xf6f2e6, emissive: 0xfff4d0, emissiveIntensity: 0.35, metalness: 0.4, roughness: 0.15, envMap: ENV }); break;
+      case 'tail': m = new T.MeshStandardMaterial({ color: 0x8a0c0c, emissive: 0xff1a1a, emissiveIntensity: 0.25, roughness: 0.3 }); break;
+      case 'plate': m = new T.MeshStandardMaterial({ color: 0xf2f2ea, roughness: 0.6 }); break;
+      case 'amber': m = new T.MeshStandardMaterial({ color: 0xffa000, emissive: 0xff8a00, emissiveIntensity: 0.2 }); break;
+      default: m = new T.MeshStandardMaterial({ color: color || 0x888888, roughness: 0.5 });
+    }
+    m.userData.keep = true;
+    matCache[key] = m;
+    return m;
+  }
+  R.carMat = mat;
+
+  /** 車体（塗装とガラスの 2 つのジオメトリ）を作る */
+  function bodyGeo(shapeKey, adj) {
+    var key = shapeKey + JSON.stringify(adj || {});
+    if (geoCache[key]) return geoCache[key];
+    var T = THREE, S = SHAPES[shapeKey], L = (adj && adj.L) || S.L, W = (adj && adj.W) || S.W;
+    var NT = 72, NS = 18, clr = S.clr || 0.3;
+    var pos = [], glassIdx = [], paintIdx = [], rows = [];
+    function tAt(k) { var u = k / NT; return 0.5 - 0.5 * Math.cos(u * Math.PI); }   // 端に点を集める
+    var hScale = ((adj && adj.H) || 1);
+    for (var k = 0; k <= NT; k++) {
+      var t = tAt(k), top = spline(S.top, t) * hScale, belt = Math.min(top, S.belt * hScale);
+      // 上から見た幅（前後の角を丸める）
+      var endR = Math.min(1, Math.min(t, 1 - t) / 0.06), hw = W / 2 * (0.9 + 0.1 * Math.sqrt(Math.max(0, endR))) * (0.97 + 0.03 * Math.sin(t * Math.PI));
+      var bot = clr - 0.08 * (1 - endR);
+      var inCab = t > S.cab[0] && t < S.cab[1];
+      var roofW = hw * (inCab ? S.roofW : 0.96);
+      if (S.bed && t > S.bed[0] && t < S.bed[1]) top = Math.min(top, belt);
+      var ring = [];
+      // 断面（右半分）: 下の中央 → 下の角 → 横 → 窓の下 → 屋根の角 → 屋根の中央
+      for (var s = 0; s <= NS; s++) {
+        var u = s / NS, x, y;
+        if (u < 0.2) { var a = u / 0.2; x = hw * (0.8 + 0.2 * Math.sin(a * Math.PI / 2)) * a + 0.0; y = bot + (0.1 * (1 - Math.cos(a * Math.PI / 2))); x = hw * 0.85 * a + hw * 0.15 * Math.sin(a * Math.PI / 2); }
+        else if (u < 0.5) { var b = (u - 0.2) / 0.3; x = hw * (1 - 0.015 * Math.pow(2 * b - 1, 2)); y = bot + 0.1 + (belt - bot - 0.1) * b; }
+        else if (u < 0.8) { var c2 = (u - 0.5) / 0.3; x = hw + (roofW - hw) * Math.sin(c2 * Math.PI / 2); y = belt + (top - belt) * (1 - Math.pow(1 - c2, 1.6)); if (top - belt < 0.04) { y = belt + (top - belt) * c2; } }
+        else { var d = (u - 0.8) / 0.2; x = roofW * Math.cos(d * Math.PI / 2 * 0.98) * (1 - d * 0.02); y = top + 0.035 * Math.sin(d * Math.PI / 2) * (inCab ? 1 : 0.3); }
+        ring.push([x, y]);
+      }
+      rows.push({ t: t, z: (t - 0.5) * L, ring: ring, inCab: inCab, belt: belt, top: top });
+    }
+    // 頂点（左右対称）
+    var P = [], idx = 0, grid = [];
+    rows.forEach(function (r) {
+      var line = [];
+      for (var s = 0; s < r.ring.length; s++) { P.push(r.ring[s][0], r.ring[s][1], r.z); line.push(idx++); }
+      for (s = r.ring.length - 2; s >= 0; s--) { P.push(-r.ring[s][0], r.ring[s][1], r.z); line.push(idx++); }   // 反対側（屋根の中央は共有しない）
+      grid.push(line);
+    });
+    var M2 = grid[0].length;
+    for (k = 0; k < rows.length - 1; k++) {
+      for (var s2 = 0; s2 < M2 - 1; s2++) {
+        var a2 = grid[k][s2], b2 = grid[k + 1][s2], c3 = grid[k + 1][s2 + 1], d2 = grid[k][s2 + 1];
+        var sIdx = s2 < NS ? s2 : 2 * NS - 1 - s2;   // 片側での断面の位置
+        var uMid = (sIdx + 0.5) / NS, r0 = rows[k], r1 = rows[k + 1];
+        // ガラス: 窓の範囲（柱をよけて）で、窓の下の線より上・屋根より下
+        var tm = (r0.t + r1.t) / 2, cab = SHAPES[shapeKey].cab, span = cab[1] - cab[0];
+        var pillar = Math.min(0.045, span * 0.08);
+        var isGlass = uMid > 0.52 && uMid < 0.8 && tm > cab[0] + pillar * 0.3 && tm < cab[1] - pillar * 0.2 && (r0.top - r0.belt) > 0.15 && (r1.top - r1.belt) > 0.15;
+        // 横の窓の真ん中の柱（B ピラー）
+        if (isGlass && uMid < 0.79 && Math.abs(tm - (cab[0] + span * 0.52)) < 0.012 && span > 0.3) isGlass = false;
+        // 前後の窓（フロント・リア）は屋根側まで
+        if (!isGlass && uMid >= 0.8 && (r0.top - r0.belt) > 0.15 && ((tm > cab[1] - span * 0.22 && tm < cab[1] - 0.01) || (tm < cab[0] + span * 0.16 && tm > cab[0] + 0.01)) && Math.abs(r1.top - r0.top) > 0.004) isGlass = true;
+        (isGlass ? glassIdx : paintIdx).push(a2, c3, b2, a2, d2, c3);
+      }
+    }
+    // 前後のふた
+    function cap(line, front) {
+      var cx = 0, cy = 0, cz = 0;
+      line.forEach(function (i) { cx += P[i * 3]; cy += P[i * 3 + 1]; cz += P[i * 3 + 2]; });
+      P.push(0, cy / line.length, cz / line.length); var ci = idx++;
+      for (var i = 0; i < line.length - 1; i++) { if (front) paintIdx.push(ci, line[i + 1], line[i]); else paintIdx.push(ci, line[i], line[i + 1]); }
+    }
+    cap(grid[0], false); cap(grid[grid.length - 1], true);
+    function mk(ix) {
+      var g = new T.BufferGeometry();
+      g.setAttribute('position', new T.Float32BufferAttribute(P, 3));
+      g.setIndex(ix); g.computeVertexNormals(); g.userData.keep = true;
+      return g;
+    }
+    geoCache[key] = { paint: mk(paintIdx), glass: mk(glassIdx), L: L, W: W, rows: rows };
+    return geoCache[key];
+  }
+
+  var wheelCache = {};
+  function wheelGeo(r, w) {
+    var key = r + ':' + w;
+    if (wheelCache[key]) return wheelCache[key];
+    var T = THREE, prof = [];
+    // タイヤの断面（回転体）
+    for (var i = 0; i <= 16; i++) {
+      var a = i / 16 * Math.PI, rr = r - 0.06 + Math.sin(a) * 0.06;
+      prof.push(new T.Vector2(r * 0.7 + (rr - r * 0.7) * (0.2 + 0.8 * Math.sin(a)), (i / 16 - 0.5) * w));
+    }
+    var tire = new T.LatheGeometry(prof, 32).rotateZ(Math.PI / 2);
+    var rim = new T.CylinderGeometry(r * 0.68, r * 0.68, w * 0.9, 28).rotateZ(Math.PI / 2);
+    var hub = new T.CylinderGeometry(r * 0.16, r * 0.16, w * 0.96, 12).rotateZ(Math.PI / 2);
+    var spokes = [];
+    for (var k = 0; k < 5; k++) {
+      var sp = new T.BoxGeometry(w * 0.2, r * 0.56, r * 0.12).translate(0, r * 0.3, 0).rotateX(k / 5 * Math.PI * 2);
+      spokes.push(sp);
+    }
+    [tire, rim, hub].concat(spokes).forEach(function (q) { q.userData.keep = true; });
+    wheelCache[key] = { tire: tire, rim: rim, hub: hub, spokes: spokes };
+    return wheelCache[key];
+  }
+
+  function wheel(g, x, y, z, r, w, side, rimColor) {
+    var T = THREE, G = wheelGeo(r, w), wg = new T.Group();
+    wg.add(new T.Mesh(G.tire, mat('tire')));
+    var rim = new T.Mesh(G.rim, mat('trim')); wg.add(rim);
+    var face = new T.Group();
+    G.spokes.forEach(function (sg) { face.add(new T.Mesh(sg, mat('rim', rimColor))); });
+    face.add(new T.Mesh(G.hub, mat('rim', rimColor)));
+    face.position.x = side * w * 0.12; wg.add(face);
+    wg.position.set(x, y, z);
+    wg.userData.wheel = true;
+    g.add(wg);
+    return wg;
+  }
+
   var carCache = {};
   function carModel(body, color, opts) {
-    var T = THREE, key = body + color + (opts && opts.front ? 'f' : '');
+    var T = THREE, key = body + color;
+    var B = (R.BODIES && R.BODIES[body]) || { h: 0.56, body: 0.64 };
+    if (carCache[key]) return carCache[key].clone();
+    var g = new T.Group();
+    var mdl = MODEL[body];
+    if (!mdl || B.kart || B.open || B.buggy || B.tractor || B.monster) { g = oldCarModel(body, color); carCache[key] = g; return g.clone(); }
+    var shapeKey = mdl[0], adj = mdl[1] || {}, bg = bodyGeo(shapeKey, adj), L = bg.L, W = bg.W, S = SHAPES[shapeKey];
+    var paintCol = body === 'police' ? '#f2f2f2' : color;
+    var paint = new T.Mesh(bg.paint, mat('paint', paintCol)), glass = new T.Mesh(bg.glass, mat('glass'));
+    g.add(paint); g.add(glass);
+    if (body === 'police') {   // 白黒のパトカー: 下半分を黒く
+      var lower = new T.Mesh(bg.paint, mat('paint', '#111418'));
+      lower.scale.set(1.004, 1, 1.004);
+      lower.material = mat('paint', '#111418');
+      var clip = new T.Plane(new T.Vector3(0, -1, 0), S.belt - 0.12);
+      lower.material = lower.material.clone(); lower.material.clippingPlanes = [clip];
+      g.add(lower);
+    }
+    var clr = S.clr || 0.3, wr = shapeKey === 'bus' || shapeKey === 'truck' ? 0.5 : shapeKey === 'box' ? 0.4 : shapeKey === 'suv' || shapeKey === 'pickup' ? 0.39 : 0.33;
+    var wb = shapeKey === 'bus' ? 0.32 : 0.34, tw = W / 2 - 0.12;
+    var rimC = B.chrome ? 0xe0e4ea : body === 'ae86' ? 0x2a2a2a : 0xb9bec4;
+    [[1, 1], [-1, 1], [1, -1], [-1, -1]].forEach(function (q) { wheel(g, q[0] * tw, wr, q[1] * L * wb, wr, 0.24, q[0], rimC); });
+    if (shapeKey === 'truck' || shapeKey === 'bus') [1, -1].forEach(function (sd) { wheel(g, sd * tw, wr, -L * 0.22, wr, 0.24, sd, rimC); });
+    // フェンダーの黒い縁（タイヤハウス）
+    [[1, 1], [-1, 1], [1, -1], [-1, -1]].forEach(function (q) {
+      var arch = new T.Mesh(new T.TorusGeometry(wr + 0.05, 0.035, 6, 20, Math.PI), mat('trim'));
+      arch.rotation.y = Math.PI / 2; arch.position.set(q[0] * (W / 2 - 0.01), wr, q[1] * L * wb); g.add(arch);
+    });
+    // 灯火・グリル・ナンバー
+    var front = L / 2, rear = -L / 2;
+    var fy = spline(S.top, 0.97) * 0.72, ry = spline(S.top, 0.03) * 0.86;
+    function part(geo, m, x, y, z) { var o = new T.Mesh(geo, m); o.position.set(x, y, z); g.add(o); return o; }
+    var hl = new T.BoxGeometry(0.34, 0.1, 0.06), tl = new T.BoxGeometry(0.36, 0.1, 0.04);
+    [1, -1].forEach(function (sd) {
+      part(hl, mat('head'), sd * (W / 2 - 0.3), fy, front - 0.06).rotation.y = sd * 0.25;
+      part(tl, mat('tail'), sd * (W / 2 - 0.26), ry, rear + 0.02);
+      part(new T.BoxGeometry(0.06, 0.05, 0.16), mat('amber'), sd * (W / 2 - 0.05), fy, front - 0.3);
+      // ドアミラー
+      if (shapeKey !== 'bus') { var mt = part(new T.BoxGeometry(0.2, 0.12, 0.1), mat('paint', paintCol), sd * (W / 2 + 0.06), S.belt + 0.08, (S.cab[1] - 0.5) * L - 0.2); mt.castShadow = true; }
+    });
+    part(new T.BoxGeometry(W * 0.36, 0.14, 0.04), mat('trim'), 0, fy - 0.1, front - 0.02);          // グリル
+    part(new T.BoxGeometry(0.33, 0.165, 0.02), mat('plate'), 0, clr + 0.2, front + 0.005);             // 前のナンバー
+    part(new T.BoxGeometry(0.33, 0.165, 0.02), mat('plate'), 0, ry - 0.2, rear - 0.005);               // 後ろのナンバー
+    part(new T.BoxGeometry(W * 0.9, 0.08, 0.1), mat('trim'), 0, clr + 0.05, front - 0.03);            // 前のバンパー下
+    part(new T.BoxGeometry(W * 0.9, 0.08, 0.1), mat('trim'), 0, clr + 0.05, rear + 0.03);
+    if (B.wing) {   // リアウイング
+      var wy = spline(S.top, 0.05) + 0.12 + B.wing * 0.8;
+      part(new T.BoxGeometry(W * 0.92, 0.04, 0.3), mat('paint', color), 0, wy, rear + 0.25);
+      [1, -1].forEach(function (sd) { part(new T.BoxGeometry(0.05, wy - spline(S.top, 0.05), 0.12), mat('trim'), sd * W * 0.32, (wy + spline(S.top, 0.05)) / 2, rear + 0.25); });
+    }
+    if (B.taxi) { part(new T.BoxGeometry(0.5, 0.2, 0.22), mat('plate'), 0, spline(S.top, 0.5) + 0.12, 0); }
+    if (B.bar) {
+      var bar = new T.Group(); bar.position.set(0, spline(S.top, 0.5) + 0.1, 0);
+      var rb = new T.Mesh(new T.BoxGeometry(0.55, 0.12, 0.26), new T.MeshBasicMaterial({ color: 0xff2020 })); rb.position.x = -0.3; bar.add(rb);
+      var bb = new T.Mesh(new T.BoxGeometry(0.55, 0.12, 0.26), new T.MeshBasicMaterial({ color: 0x2050ff })); bb.position.x = 0.3; bar.add(bb);
+      bar.userData.siren = [rb, bb]; g.add(bar);
+    }
+    if (B.stripes) [0.14, -0.14].forEach(function (x) { part(new T.BoxGeometry(0.12, 0.01, L * 0.96), new T.MeshStandardMaterial({ color: 0xffffff, roughness: 0.3 }), x, spline(S.top, 0.5) + 0.03, 0); });
+    if (B.panda) {   // パンダ（白黒）: 下半分を黒く
+      var pl = new T.Mesh(bg.paint, mat('paint', '#16181b').clone()); pl.material.clippingPlanes = [new T.Plane(new T.Vector3(0, -1, 0), S.belt - 0.28)]; g.add(pl);
+    }
+    if (shapeKey === 'truck' || (shapeKey === 'box' && (B.ribs || body === 'camper'))) {   // 荷台の箱
+      var cargoL = L * 0.72;
+      part(new T.BoxGeometry(W * 1.02, spline(S.top, 0.3) - 0.9, cargoL), mat('paint', body === 'fire' ? color : '#e9ecef'), 0, (spline(S.top, 0.3) + 0.9) / 2, -L / 2 + cargoL / 2 + 0.05);
+    }
+    if (B.cross) { part(new T.BoxGeometry(0.02, 0.5, 0.14), new T.MeshBasicMaterial({ color: 0xe53935 }), W / 2 + 0.01, 1.4, -0.4); part(new T.BoxGeometry(0.02, 0.14, 0.5), new T.MeshBasicMaterial({ color: 0xe53935 }), W / 2 + 0.01, 1.4, -0.4); }
+    if (B.ladder) part(new T.BoxGeometry(0.5, 0.1, L * 0.7), mat('chrome'), 0, spline(S.top, 0.4) + 0.1, -0.3);
+    // 影（真下の暗がり）
+    var sh = new T.Mesh(new T.PlaneGeometry(W * 1.1, L * 1.02), new T.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.28, depthWrite: false }));
+    sh.rotation.x = -Math.PI / 2; sh.position.y = 0.02; g.add(sh);
+    g.traverse(function (o) { if (o.isMesh && o !== sh) { o.castShadow = true; o.receiveShadow = true; } });
+    carCache[key] = g;
+    return g.clone();
+  }
+
+  /* ---------- 車の立体 ---------- */
+  var oldCache = {};
+  function oldCarModel(body, color, opts) {   // カート・バギーなどの特殊な車
+    var T = THREE, key = body + color, carCache = oldCache;
     var B = (R.BODIES && R.BODIES[body]) || { h: 0.56, body: 0.64 };
     var wm = (B.wm || 1) * (B.wide || 1);
     var W = 1.8 * wm, Hh = Math.max(0.9, 1.8 * (B.h || 0.56) * 1.4), Lg = B.box ? (body === 'bus' ? 11 : body === 'truck' || body === 'fire' ? 8 : body === 'train' ? 18 : 5.2) : B.kart ? 1.9 : B.open ? 4.8 : 4.4;
@@ -401,6 +679,7 @@
   /* =====================================================================
      1 セッションぶんの 3D の舞台
      ===================================================================== */
+  R.carModel = function (b, c) { return carModel(b, c); };
   R.Render3D = function (canvas, sess) {
     var T = THREE;
     var renderer = new T.WebGLRenderer({ canvas: canvas, antialias: true, alpha: false, powerPreference: 'high-performance' });
@@ -409,6 +688,8 @@
     renderer.toneMapping = T.ACESFilmicToneMapping; renderer.toneMappingExposure = 0.92;
     renderer.shadowMap.enabled = true; renderer.shadowMap.type = T.PCFSoftShadowMap;
     renderer.setSize(canvas.width, canvas.height, false);
+    renderer.localClippingEnabled = true;
+    envMap(renderer);
     var stage = null, city = null;
 
     function textPlane(d) {   // 案内標識の文字
@@ -546,11 +827,11 @@
       if (!stage) return;
       if (city) stage.scene.remove(city.group);   // 街は次の道でも使い回す
       stage.scene.traverse(function (o) {
-        if (o.geometry && !o.userData.shared) o.geometry.dispose();
-        if (o.material) { (Array.isArray(o.material) ? o.material : [o.material]).forEach(function (m) { if (m.map) m.map.dispose(); m.dispose(); }); }
+        if (o.geometry && !o.userData.shared && !o.geometry.userData.keep) o.geometry.dispose();
+        if (o.material) { (Array.isArray(o.material) ? o.material : [o.material]).forEach(function (m) { if (m.userData.keep) return; if (m.map && !m.map.userData.keep) m.map.dispose(); m.dispose(); }); }
       });
       stage = null;
-      carCache = {};
+      oldCache = {};
     }
 
     build(sess);
